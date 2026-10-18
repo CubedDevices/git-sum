@@ -35,6 +35,7 @@
 struct GitLogRow
 {
     wxString id;
+    wxString fullId;
     wxString author;
     wxString date;
     wxString summary;
@@ -42,12 +43,31 @@ struct GitLogRow
 };
 
 /**
+ * @brief One file changed by a commit.
+ */
+struct GitCommitFile
+{
+    wxString status;
+    wxString path;
+};
+
+/**
+ * @brief Files changed by one commit, compared with its first parent.
+ */
+struct GitCommitFilesResult
+{
+    bool ok = false;
+    wxString error;
+    std::vector<GitCommitFile> files;
+};
+
+/**
  * @brief Result of reading history for the repository that contains a directory.
  *
  * At most 500 commits are returned. @c truncated is true when older commits exist.
- * @c scope is the directory relative to the work tree. It is empty when @c directory
- * is the work tree itself, and history is then the whole repository. Otherwise only
- * commits that touch that directory are included.
+ * @c scope is the file or directory relative to the work tree. It is empty when
+ * @c directory is the work tree itself, and history is then the whole repository.
+ * Otherwise only commits that touch that file or directory are included.
  */
 struct GitLogResult
 {
@@ -60,7 +80,10 @@ struct GitLogResult
     std::vector<GitLogRow> rows;
 };
 
-/// Read history for the repository that contains @a directory, limited to that directory.
-GitLogResult QueryGitLog(const wxString& directory);
+/// Read history for the repository that contains @a path, limited to that file or directory.
+GitLogResult QueryGitLog(const wxString& path);
+
+/// Files changed by the commit @a fullId in the repository that contains @a directory.
+GitCommitFilesResult QueryCommitFiles(const wxString& directory, const wxString& fullId);
 
 #endif // GITLOG_H

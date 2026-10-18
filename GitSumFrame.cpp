@@ -129,6 +129,17 @@ bool IsGitControlledDirectory(const wxString& path)
     }
 }
 
+bool IsGitControlledPath(const wxString& path)
+{
+    if ( wxFileName::DirExists(path) )
+        return IsGitControlledDirectory(path);
+    if ( !wxFileName::FileExists(path) )
+        return false;
+    wxFileName file(path);
+    file.Normalize(wxPATH_NORM_ABSOLUTE | wxPATH_NORM_DOTS | wxPATH_NORM_TILDE);
+    return IsGitControlledDirectory(file.GetPath());
+}
+
 bool ValidNewName(const wxString& name, wxString& error)
 {
     if ( name.empty() || name == "." || name == ".." )
@@ -361,6 +372,7 @@ GitSumFrame::GitSumFrame(const GitSumConfig& config, bool silentNotices)
     , m_dirCtrl(nullptr)
     , m_right(nullptr)
     , m_summary(nullptr)
+    , m_commitFiles(nullptr)
     , m_commitMessage(nullptr)
     , m_list(nullptr)
     , m_address(nullptr)
@@ -525,7 +537,7 @@ void GitSumFrame::BuildBody()
     wxSplitterWindow* splitter = new wxSplitterWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxSP_LIVE_UPDATE);
     m_dirCtrl = new wxGenericDirCtrl(splitter, wxID_ANY, m_currentDir,
                                       wxDefaultPosition, wxDefaultSize,
-                                      wxDIRCTRL_DIR_ONLY | wxDIRCTRL_3D_INTERNAL);
+                                      wxDIRCTRL_3D_INTERNAL);
     m_right = new wxPanel(splitter, wxID_ANY);
     wxBoxSizer* rightSizer = new wxBoxSizer(wxVERTICAL);
     m_summary = new wxStaticText(m_right, wxID_ANY, wxString());
@@ -536,6 +548,13 @@ void GitSumFrame::BuildBody()
     m_list->AppendColumn("Size", wxLIST_FORMAT_RIGHT, 100);
     m_list->AppendColumn("Modified", wxLIST_FORMAT_LEFT, 160);
     rightSizer->Add(m_list, 3, wxEXPAND);
+    m_commitFiles = new wxListCtrl(m_right, wxID_ANY, wxDefaultPosition, wxSize(-1, 120),
+                                   wxLC_REPORT | wxLC_SINGLE_SEL);
+    m_commitFiles->AppendColumn("Change", wxLIST_FORMAT_LEFT, 110);
+    m_commitFiles->AppendColumn("Path", wxLIST_FORMAT_LEFT, 480);
+    m_commitFiles->Hide();
+    rightSizer->Add(m_commitFiles, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
+    rightSizer->Hide(m_commitFiles);
     m_commitMessage = new wxTextCtrl(m_right, wxID_ANY, wxString(), wxDefaultPosition, wxSize(-1, 140),
                                      wxTE_MULTILINE | wxTE_READONLY | wxTE_BESTWRAP);
     m_commitMessage->Hide();
@@ -571,6 +590,33 @@ void GitSumFrame::BindDirEvents()
 
 void GitSumFrame::ShowDirectory(const wxString& path, bool updateTree)
 {
+    if ( wxFileName::FileExists(path) && !wxFileName::DirExists(path) )
+    {
+        wxFileName file(path);
+        file.Normalize(wxPATH_NORM_ABSOLUTE | wxPATH_NORM_DOTS | wxPATH_NORM_TILDE);
+        const wxString full = file.GetFullPath();
+        const wxString parent = file.GetPath();
+        if ( !PathsEqual(parent, m_currentDir) )
+            ShowDirectory(parent, false);
+        m_logTarget = full;
+        if ( updateTree && m_dirCtrl )
+        {
+            m_settingPath = true;
+            m_dirCtrl->SetPath(full);
+            m_settingPath = false;
+        }
+        if ( m_pane == Pane::Files )
+        {
+            ClearSelection();
+            SelectName(file.GetFullName());
+        }
+        else if ( m_pane == Pane::Log )
+            RefreshPane();
+        else
+            UpdateCommandState();
+        return;
+    }
+
     if ( !wxFileName::DirExists(path) )
     {
         Notify("Folder does not exist:\n" + path, wxICON_WARNING);
@@ -596,6 +642,7 @@ void GitSumFrame::ShowDirectory(const wxString& path, bool updateTree)
 
     m_config.SetLastPath(m_currentDir);
     m_config.Save();
+    m_logTarget = m_currentDir;
     if ( m_pane != Pane::Files && !IsGitControlledDirectory(m_currentDir) )
         m_pane = Pane::Files;
     SyncToggles();
@@ -605,6 +652,27 @@ void GitSumFrame::ShowDirectory(const wxString& path, bool updateTree)
 
 void GitSumFrame::ShowPane(Pane pane)
 {
+    if ( pane == Pane::Log )
+    {
+        const wxString path = GitLogPath();
+        if ( path.empty() || !IsGitControlledPath(path) )
+        {
+            Notify("Select a Git file or directory.", wxICON_INFORMATION);
+            SyncToggles();
+            return;
+        }
+        const bool isFile = wxFileName::FileExists(path) && !wxFileName::DirExists(path);
+        if ( isFile || !PathsEqual(path, m_currentDir) )
+            ShowDirectory(path, !isFile);
+        if ( !isFile )
+            m_logTarget = m_currentDir;
+        m_pane = Pane::Log;
+        SyncToggles();
+        RefreshPane();
+        UpdateCommandState();
+        return;
+    }
+
     if ( pane != Pane::Files )
     {
         const wxString path = GitSelectionPath();
@@ -636,8 +704,14 @@ void GitSumFrame::RefreshPane()
 
     if ( m_summary )
         m_summary->Show(m_pane != Pane::Files);
-    if ( m_commitMessage && m_right && m_right->GetSizer() )
-        m_right->GetSizer()->Show(m_commitMessage, m_pane == Pane::Log);
+    if ( m_right && m_right->GetSizer() )
+    {
+        const bool log = m_pane == Pane::Log;
+        if ( m_commitFiles )
+            m_right->GetSizer()->Show(m_commitFiles, log);
+        if ( m_commitMessage )
+            m_right->GetSizer()->Show(m_commitMessage, log);
+    }
 
     if ( m_pane == Pane::Files )
         FillList();
@@ -873,10 +947,12 @@ void GitSumFrame::FillLog()
     m_list->Freeze();
     m_list->DeleteAllItems();
 
-    const GitLogResult result = QueryGitLog(m_currentDir);
+    const wxString logPath = m_logTarget.empty() ? m_currentDir : m_logTarget;
+    const GitLogResult result = QueryGitLog(logPath);
     if ( !result.ok )
     {
         m_logMessages.clear();
+        m_logIds.clear();
         ShowCommitMessage(-1);
         SetSummary(result.error);
         m_list->Thaw();
@@ -899,7 +975,9 @@ void GitSumFrame::FillLog()
     SetSummary(summary);
 
     m_logMessages.clear();
+    m_logIds.clear();
     m_logMessages.reserve(result.rows.size());
+    m_logIds.reserve(result.rows.size());
     for ( size_t i = 0; i < result.rows.size(); ++i )
     {
         const long row = m_list->InsertItem(m_list->GetItemCount(), result.rows[i].id);
@@ -907,6 +985,7 @@ void GitSumFrame::FillLog()
         m_list->SetItem(row, 2, result.rows[i].date);
         m_list->SetItem(row, 3, result.rows[i].summary);
         m_logMessages.push_back(result.rows[i].message);
+        m_logIds.push_back(result.rows[i].fullId);
     }
     if ( !m_logMessages.empty() )
         m_list->SetItemState(0, wxLIST_STATE_SELECTED, wxLIST_STATE_SELECTED);
@@ -925,6 +1004,29 @@ void GitSumFrame::ShowCommitMessage(long index)
         m_commitMessage->ChangeValue(wxString());
     else
         m_commitMessage->ChangeValue(m_logMessages[static_cast<size_t>(index)]);
+    ShowCommitFiles(index);
+}
+
+void GitSumFrame::ShowCommitFiles(long index)
+{
+    if ( !m_commitFiles )
+        return;
+    m_commitFiles->DeleteAllItems();
+    if ( index < 0 || static_cast<size_t>(index) >= m_logIds.size() || m_logIds[static_cast<size_t>(index)].empty() )
+        return;
+
+    const GitCommitFilesResult files = QueryCommitFiles(m_currentDir, m_logIds[static_cast<size_t>(index)]);
+    if ( !files.ok )
+    {
+        const long row = m_commitFiles->InsertItem(0, wxString());
+        m_commitFiles->SetItem(row, 1, files.error.empty() ? wxString("Could not list the commit files.") : files.error);
+        return;
+    }
+    for ( size_t i = 0; i < files.files.size(); ++i )
+    {
+        const long row = m_commitFiles->InsertItem(m_commitFiles->GetItemCount(), files.files[i].status);
+        m_commitFiles->SetItem(row, 1, files.files[i].path);
+    }
 }
 
 void GitSumFrame::RefreshTree()
@@ -953,13 +1055,15 @@ void GitSumFrame::UpdateCommandState()
     const bool canPaste = !m_copiedPaths.empty();
     const wxString gitPath = GitSelectionPath();
     const bool git = !gitPath.empty() && IsGitControlledDirectory(gitPath);
+    const wxString logPath = GitLogPath();
+    const bool canLog = !logPath.empty() && IsGitControlledPath(logPath);
     const bool canUp = !IsVolumeRoot(m_currentDir);
 
     GetMenuBar()->Enable(ID_COPY_PATHS, haveSelection);
     GetMenuBar()->Enable(ID_PASTE_PATHS, canPaste);
     GetMenuBar()->Enable(ID_DELETE_PATHS, haveSelection);
     for ( int id : kGitIds )
-        GetMenuBar()->Enable(id, git);
+        GetMenuBar()->Enable(id, id == ID_GIT_LOG ? canLog : git);
     const bool canInit = !gitPath.empty() && wxFileName::DirExists(gitPath) && !git;
     GetMenuBar()->Enable(ID_GIT_INIT, canInit);
 
@@ -971,11 +1075,11 @@ void GitSumFrame::UpdateCommandState()
         tools->EnableTool(ID_PASTE_PATHS, canPaste);
         tools->EnableTool(ID_DELETE_PATHS, haveSelection);
         for ( int id : kGitIds )
-            tools->EnableTool(id, git);
+            tools->EnableTool(id, id == ID_GIT_LOG ? canLog : git);
         tools->EnableTool(ID_GIT_INIT, canInit);
     }
 
-    SetStatusText(git ? "Git repository" : wxString(), 1);
+    SetStatusText((git || canLog) ? "Git repository" : wxString(), 1);
 }
 
 wxArrayString GitSumFrame::SelectedPaths() const
@@ -1023,6 +1127,26 @@ wxString GitSumFrame::GitSelectionPath() const
     if ( item < 0 || static_cast<size_t>(item) >= m_entries.size() )
         return wxString();
     if ( !m_entries[static_cast<size_t>(item)].isDir )
+        return wxString();
+    return m_entries[static_cast<size_t>(item)].path;
+}
+
+wxString GitSumFrame::GitLogPath() const
+{
+    if ( !m_contextTreePath.empty() )
+        return m_contextTreePath;
+
+    if ( m_pane != Pane::Files )
+        return m_logTarget.empty() ? m_currentDir : m_logTarget;
+
+    const int count = m_list->GetSelectedItemCount();
+    if ( count == 0 )
+        return m_currentDir;
+    if ( count != 1 )
+        return wxString();
+
+    const long item = m_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+    if ( item < 0 || static_cast<size_t>(item) >= m_entries.size() )
         return wxString();
     return m_entries[static_cast<size_t>(item)].path;
 }
@@ -1167,6 +1291,7 @@ bool GitSumFrame::CreateFile(const wxString& name)
         return false;
     }
     file.Close();
+    RefreshTree();
     RefreshPane();
     UpdateCommandState();
     return true;
@@ -1625,7 +1750,8 @@ bool GitSumFrame::RunSelfTest()
 
     if ( !frame->SelectName("note.txt") )
         return Fail("could not select note.txt");
-    if ( frame->CommandEnabled(ID_GIT_STATUS) || frame->CommandEnabled(ID_GIT_INIT) )
+    if ( frame->CommandEnabled(ID_GIT_STATUS) || frame->CommandEnabled(ID_GIT_INIT) ||
+         frame->CommandEnabled(ID_GIT_LOG) )
         return Fail("Git commands should be disabled when a file is selected");
     if ( !frame->CommandEnabled(ID_COPY_PATHS) )
         return Fail("Copy should be enabled when an item is selected");
@@ -1659,6 +1785,8 @@ bool GitSumFrame::RunSelfTest()
 
     if ( !frame->SelectName("note.txt") || frame->CommandEnabled(ID_GIT_COMMIT) )
         return Fail("selecting a file inside a repository should disable Git commands");
+    if ( !frame->CommandEnabled(ID_GIT_LOG) )
+        return Fail("log should be enabled for a file inside a repository");
     frame->ClearSelection();
     if ( !frame->CommandEnabled(ID_GIT_LOG) )
         return Fail("clearing the selection should enable Git commands for the repository");
@@ -1936,6 +2064,17 @@ bool GitSumFrame::RunSelfTest()
     if ( !frame->m_commitMessage->IsShown() ||
          !frame->m_commitMessage->GetValue().Contains("The folder follows the selection.") )
         return Fail("log did not show the commit message");
+    if ( !frame->m_commitFiles->IsShown() )
+        return Fail("log did not show the commit files");
+    bool sawNestedFile = false;
+    for ( long fileRow = 0; fileRow < frame->m_commitFiles->GetItemCount(); ++fileRow )
+    {
+        if ( frame->m_commitFiles->GetItemText(fileRow, 1) == "sub/other.txt" &&
+             frame->m_commitFiles->GetItemText(fileRow, 0) == "added" )
+            sawNestedFile = true;
+    }
+    if ( !sawNestedFile )
+        return Fail("commit file list did not show sub/other.txt");
 
     frame->ShowDirectory(live, true);
     if ( frame->m_pane != Pane::Log )
@@ -1956,17 +2095,68 @@ bool GitSumFrame::RunSelfTest()
     if ( !frame->m_commitMessage->GetValue().Contains("Initial commit") ||
          frame->m_commitMessage->GetValue().Contains("The folder follows the selection.") )
         return Fail("selecting a commit did not show its message");
+    bool sawHelloFile = false;
+    bool sawNestedInInitial = false;
+    for ( long fileRow = 0; fileRow < frame->m_commitFiles->GetItemCount(); ++fileRow )
+    {
+        const wxString path = frame->m_commitFiles->GetItemText(fileRow, 1);
+        if ( path == "hello.txt" && frame->m_commitFiles->GetItemText(fileRow, 0) == "added" )
+            sawHelloFile = true;
+        if ( path.Contains("other.txt") )
+            sawNestedInInitial = true;
+    }
+    if ( !sawHelloFile || sawNestedInInitial )
+        return Fail("selecting a commit did not show its files");
 
     const GitLogResult nestedHistory = QueryGitLog(liveSub);
     if ( !nestedHistory.ok || nestedHistory.rows.size() != 1 ||
          nestedHistory.rows[0].summary != "Nested file" || nestedHistory.scope != "sub" )
         return Fail("log query did not follow the folder");
 
+    wxCommandEvent logForFile(wxEVT_MENU, ID_GIT_LOG);
+    logForFile.SetInt(0);
+    frame->OnGitLog(logForFile);
+    if ( !frame->SelectName("hello.txt") || !frame->CommandEnabled(ID_GIT_LOG) ||
+         frame->CommandEnabled(ID_GIT_STATUS) )
+        return Fail("log should be enabled for a file and other Git commands disabled");
+    logForFile.SetInt(1);
+    frame->OnGitLog(logForFile);
+    if ( frame->m_pane != Pane::Log || frame->m_list->GetItemCount() != 1 ||
+         frame->m_list->GetItemText(0, 3) != "Initial commit" ||
+         !frame->m_summary->GetLabel().Contains("hello.txt") )
+        return Fail("log did not follow the selected file");
+    const GitLogResult fileHistory = QueryGitLog(JoinPath(live, "hello.txt"));
+    if ( !fileHistory.ok || fileHistory.rows.size() != 1 ||
+         fileHistory.rows[0].summary != "Initial commit" || fileHistory.scope != "hello.txt" )
+        return Fail("log query did not follow the file");
+    const GitLogResult otherHistory = QueryGitLog(JoinPath(liveSub, "other.txt"));
+    if ( !otherHistory.ok || otherHistory.rows.size() != 1 ||
+         otherHistory.rows[0].summary != "Nested file" || otherHistory.scope != "sub/other.txt" )
+        return Fail("log query did not follow the nested file");
+
+    frame->RefreshTree();
+    wxTreeCtrl* tree = frame->m_dirCtrl->GetTreeCtrl();
+    const wxTreeItemId folder = tree->GetSelection();
+    wxTreeItemId helloItem;
+    wxTreeItemIdValue cookie;
+    for ( wxTreeItemId child = tree->GetFirstChild(folder, cookie); child.IsOk(); child = tree->GetNextChild(folder, cookie) )
+    {
+        if ( tree->GetItemText(child) == "hello.txt" )
+            helloItem = child;
+    }
+    if ( !helloItem.IsOk() )
+        return Fail("folder view did not show hello.txt");
+    tree->SelectItem(helloItem);
+    if ( frame->m_pane != Pane::Log || frame->m_list->GetItemCount() != 1 ||
+         frame->m_list->GetItemText(0, 3) != "Initial commit" )
+        return Fail("selecting a file in the folder view did not show its log");
+
     wxCommandEvent logOff(wxEVT_MENU, ID_GIT_LOG);
     logOff.SetInt(0);
     frame->OnGitLog(logOff);
     if ( frame->m_pane != Pane::Files || frame->GetMenuBar()->IsChecked(ID_GIT_LOG) ||
-         frame->m_list->GetColumnCount() != 3 || frame->m_commitMessage->IsShown() )
+         frame->m_list->GetColumnCount() != 3 || frame->m_commitMessage->IsShown() ||
+         frame->m_commitFiles->IsShown() )
         return Fail("log toggle did not restore the file list");
     if ( !frame->SelectName("hello.txt") )
         return Fail("file list did not show hello.txt after log");

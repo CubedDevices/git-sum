@@ -115,6 +115,7 @@ private:
     void SortStatusList();
     void FillLog();
     void ShowCommitMessage(long index);
+    void ShowCommitFiles(long index);
     void RefreshTree();
     void GoUp();
     void UpdateCommandState();
@@ -131,6 +132,7 @@ private:
     wxArrayString SelectedPaths() const;
     wxString TargetDirectory() const;
     wxString GitSelectionPath() const;
+    wxString GitLogPath() const;
     bool CommandEnabled(int id) const;
 
     void Notify(const wxString& message, int icon = wxICON_INFORMATION);
@@ -164,6 +166,7 @@ private:
     wxGenericDirCtrl* m_dirCtrl;
     wxPanel* m_right;
     wxStaticText* m_summary;
+    wxListCtrl* m_commitFiles;
     wxTextCtrl* m_commitMessage;
     wxListCtrl* m_list;
     wxTextCtrl* m_address;
@@ -175,6 +178,8 @@ private:
     wxArrayString m_copiedPaths;
     std::vector<Entry> m_entries;
     std::vector<wxString> m_logMessages;
+    std::vector<wxString> m_logIds;
+    wxString m_logTarget;
     wxString m_contextTreePath;
     bool m_settingPath;
     bool m_silentNotices;

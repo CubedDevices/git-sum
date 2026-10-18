@@ -270,6 +270,9 @@ GitLogResult QueryGitLog(const wxString& directory)
         char shortId[8] = { 0 };
         git_oid_tostr(shortId, sizeof(shortId), &oid);
         row.id = wxString::FromUTF8(shortId);
+        char fullId[GIT_OID_HEXSZ + 1] = { 0 };
+        git_oid_tostr(fullId, sizeof(fullId), &oid);
+        row.fullId = wxString::FromUTF8(fullId);
         row.author = AuthorText(git_commit_author(commit));
         const wxDateTime when(static_cast<time_t>(git_commit_time(commit)));
         if ( when.IsValid() )
@@ -289,5 +292,147 @@ GitLogResult QueryGitLog(const wxString& directory)
     git_revwalk_free(walk);
     git_repository_free(repo);
     result.ok = true;
+    return result;
+}
+
+namespace
+{
+
+wxString DeltaStatus(git_delta_t status)
+{
+    switch ( status )
+    {
+    case GIT_DELTA_ADDED:
+        return "added";
+    case GIT_DELTA_DELETED:
+        return "deleted";
+    case GIT_DELTA_MODIFIED:
+        return "modified";
+    case GIT_DELTA_RENAMED:
+        return "renamed";
+    case GIT_DELTA_COPIED:
+        return "copied";
+    case GIT_DELTA_TYPECHANGE:
+        return "type change";
+    default:
+        return wxString();
+    }
+}
+
+wxString DeltaPath(const git_diff_delta* delta)
+{
+    const wxString oldPath = FromUtf8(delta->old_file.path);
+    const wxString newPath = FromUtf8(delta->new_file.path);
+    if ( delta->status == GIT_DELTA_DELETED )
+        return oldPath;
+    if ( (delta->status == GIT_DELTA_RENAMED || delta->status == GIT_DELTA_COPIED) &&
+         !oldPath.empty() && oldPath != newPath )
+        return oldPath + " -> " + newPath;
+    return newPath.empty() ? oldPath : newPath;
+}
+
+} // namespace
+
+GitCommitFilesResult QueryCommitFiles(const wxString& directory, const wxString& fullId)
+{
+    GitCommitFilesResult result;
+    git_libgit2_init();
+
+    const wxScopedCharBuffer utf8 = directory.utf8_str();
+    git_buf discovered = GIT_BUF_INIT;
+    if ( git_repository_discover(&discovered, utf8.data(), 0, nullptr) != 0 )
+    {
+        result.error = "Not a Git repository.";
+        git_buf_dispose(&discovered);
+        return result;
+    }
+
+    git_repository* repo = nullptr;
+    const int opened = git_repository_open(&repo, discovered.ptr);
+    git_buf_dispose(&discovered);
+    if ( opened != 0 || !repo )
+    {
+        result.error = GitLastError("Could not open the repository.");
+        return result;
+    }
+
+    git_oid oid;
+    const wxScopedCharBuffer idUtf8 = fullId.utf8_str();
+    if ( git_oid_fromstr(&oid, idUtf8.data()) != 0 )
+    {
+        result.error = "Could not read the commit.";
+        git_repository_free(repo);
+        return result;
+    }
+
+    git_commit* commit = nullptr;
+    if ( git_commit_lookup(&commit, repo, &oid) != 0 || !commit )
+    {
+        result.error = GitLastError("Could not read the commit.");
+        git_repository_free(repo);
+        return result;
+    }
+
+    git_tree* tree = nullptr;
+    git_tree* parentTree = nullptr;
+    git_commit* parent = nullptr;
+    git_diff* diff = nullptr;
+    if ( git_commit_tree(&tree, commit) != 0 )
+    {
+        result.error = GitLastError("Could not read the commit tree.");
+        git_commit_free(commit);
+        git_repository_free(repo);
+        return result;
+    }
+    if ( git_commit_parentcount(commit) > 0 )
+    {
+        if ( git_commit_parent(&parent, commit, 0) != 0 || git_commit_tree(&parentTree, parent) != 0 )
+        {
+            result.error = GitLastError("Could not read the parent commit.");
+            if ( parent )
+                git_commit_free(parent);
+            git_tree_free(tree);
+            git_commit_free(commit);
+            git_repository_free(repo);
+            return result;
+        }
+    }
+
+    git_diff_options options = GIT_DIFF_OPTIONS_INIT;
+    if ( git_diff_tree_to_tree(&diff, repo, parentTree, tree, &options) != 0 || !diff )
+    {
+        result.error = GitLastError("Could not list the commit files.");
+    }
+    else
+    {
+        git_diff_find_similar(diff, nullptr);
+        const size_t count = git_diff_num_deltas(diff);
+        result.files.reserve(count);
+        for ( size_t i = 0; i < count; ++i )
+        {
+            const git_diff_delta* delta = git_diff_get_delta(diff, i);
+            if ( !delta )
+                continue;
+            const wxString status = DeltaStatus(delta->status);
+            if ( status.empty() )
+                continue;
+            GitCommitFile file;
+            file.status = status;
+            file.path = DeltaPath(delta);
+            result.files.push_back(file);
+        }
+        result.ok = true;
+    }
+
+    if ( diff )
+        git_diff_free(diff);
+    if ( parentTree )
+        git_tree_free(parentTree);
+    if ( tree )
+        git_tree_free(tree);
+    if ( parent )
+        git_commit_free(parent);
+    git_commit_free(commit);
+    git_repository_free(repo);
     return result;
 }

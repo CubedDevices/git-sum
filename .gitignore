@@ -1,0 +1,4 @@
+/build/MSW/.vs/
+/build/MSW/x64/
+/third_party/
+*.vcxproj.user
