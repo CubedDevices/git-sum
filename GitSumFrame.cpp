@@ -1772,12 +1772,29 @@ void GitSumFrame::OnListColumn(wxListEvent& event)
     SortStatusList();
 }
 
+long GitSumFrame::ListIndexAt(const wxPoint& screen) const
+{
+    if ( !m_list )
+        return -1;
+
+    // HitTest() on the generic report control ignores the column header, so a
+    // point in list-client coordinates lands on the row below the pointer.
+    // Item rectangles already include the header.
+    const wxPoint client = m_list->ScreenToClient(screen);
+    const long count = m_list->GetItemCount();
+    for ( long i = 0; i < count; ++i )
+    {
+        wxRect rect;
+        if ( m_list->GetItemRect(i, rect) && rect.Contains(client) )
+            return i;
+    }
+    return -1;
+}
+
 void GitSumFrame::OnListContext(wxContextMenuEvent& event)
 {
     const wxPoint screen = event.GetPosition() == wxDefaultPosition ? wxGetMousePosition() : event.GetPosition();
-    const wxPoint client = m_list->ScreenToClient(screen);
-    int flags = 0;
-    const long index = m_list->HitTest(client, flags);
+    const long index = ListIndexAt(screen);
     if ( index >= 0 && m_list->GetItemState(index, wxLIST_STATE_SELECTED) == 0 )
     {
         ClearSelection();
@@ -2343,6 +2360,29 @@ bool GitSumFrame::RunSelfTest()
     if ( frame->m_pane != Pane::Files || frame->GetMenuBar()->IsChecked(ID_GIT_STATUS) )
         return Fail("leaving a repository should restore the file list");
     frame->ShowDirectory(repo, true);
+
+    frame->Show();
+    wxYield();
+    bool checkedRow = false;
+    const long rowCount = frame->m_list->GetItemCount();
+    for ( long i = 0; i < rowCount; ++i )
+    {
+        wxRect rect;
+        if ( !frame->m_list->GetItemRect(i, rect) )
+            return Fail("could not measure a file row");
+        const wxPoint inside(8, rect.height / 2);
+        if ( !frame->m_list->GetClientRect().Contains(rect.GetTopLeft() + inside) )
+            continue;
+        const wxPoint screen = frame->m_list->ClientToScreen(rect.GetTopLeft() + inside);
+        const long hit = frame->ListIndexAt(screen);
+        if ( hit != i )
+            return Fail(wxString::Format("right-click on row %ld hit row %ld", i, hit));
+        checkedRow = true;
+    }
+    if ( !checkedRow )
+        return Fail("no visible file row to check right-click selection");
+    frame->ClearSelection();
+    frame->Hide();
 
     GitSumConfig check(configPath);
     if ( !PathsEqual(check.LastPath(), repo) )

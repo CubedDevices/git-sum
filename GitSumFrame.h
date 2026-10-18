@@ -131,6 +131,7 @@ private:
     void ClearSelection();
 
     wxArrayString SelectedPaths() const;
+    long ListIndexAt(const wxPoint& screen) const;
     wxString TargetDirectory() const;
     wxString GitSelectionPath() const;
     wxString GitLogPath() const;
