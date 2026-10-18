@@ -31,6 +31,14 @@
     #include "wx/app.h"
 #endif
 
+class wxString;
+
+/// Route wx asserts to a temp file during --self-test. No dialog is shown.
+void InstallSelfTestAssertHandler();
+
+/// @c true when a wx assert fired since InstallSelfTestAssertHandler().
+bool SelfTestHadAssert(wxString& text);
+
 /**
  * @brief wxWidgets application object for the git-sum file browser.
  */

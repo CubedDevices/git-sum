@@ -28,26 +28,98 @@
 #include "GitSumFrame.h"
 
 #include "wx/cmdline.h"
+#include "wx/debug.h"
+#include "wx/filefn.h"
 
 #ifdef __WXMSW__
 #include <stdio.h>
 #include <windows.h>
 #endif
 
+namespace
+{
+
+wxString g_assertText;
+int g_assertCount = 0;
+
+wxString AssertPath()
+{
+#ifdef __WXMSW__
+    wchar_t temp[MAX_PATH] = { 0 };
+    const DWORD n = ::GetTempPathW(MAX_PATH, temp);
+    if ( n > 0 && n < MAX_PATH )
+        return wxString(temp) + "git-sum-selftest-assert.txt";
+#endif
+    return "git-sum-selftest-assert.txt";
+}
+
+void SelfTestAssertHandler(const wxString& file,
+                           int line,
+                           const wxString& func,
+                           const wxString& cond,
+                           const wxString& msg)
+{
+    if ( g_assertCount >= 30 )
+    {
+        ++g_assertCount;
+        return;
+    }
+    ++g_assertCount;
+    const wxString text = wxString::Format("%s(%d): %s: assert (%s) failed: %s\n",
+                                           file, line, func, cond, msg);
+    g_assertText += text;
+    FILE* out = nullptr;
+#ifdef __WXMSW__
+    _wfopen_s(&out, AssertPath().wc_str(), L"a");
+#else
+    out = fopen(AssertPath().utf8_str(), "a");
+#endif
+    if ( out )
+    {
+        const wxScopedCharBuffer utf8 = text.utf8_str();
+        std::fputs(utf8.data() ? utf8.data() : "", out);
+        std::fclose(out);
+    }
+}
+
+} // namespace
+
+void InstallSelfTestAssertHandler()
+{
+    g_assertText.clear();
+    g_assertCount = 0;
+#ifdef __WXMSW__
+    _wremove(AssertPath().wc_str());
+#else
+    remove(AssertPath().mb_str());
+#endif
+    wxSetAssertHandler(SelfTestAssertHandler);
+}
+
+bool SelfTestHadAssert(wxString& text)
+{
+    text = g_assertText;
+    if ( g_assertCount > 30 )
+        text += wxString::Format("... %d further asserts omitted\n", g_assertCount - 30);
+    return g_assertCount > 0;
+}
+
 wxIMPLEMENT_APP(GitSumApp);
 
 bool GitSumApp::OnInit()
 {
-    if ( !wxApp::OnInit() )
-        return false;
-
-    SetAppName("git-sum");
-
     for ( int i = 1; i < argc; ++i )
     {
         if ( wxString(argv[i]) == "--self-test" )
             m_selfTest = true;
     }
+    if ( m_selfTest )
+        InstallSelfTestAssertHandler();
+
+    if ( !wxApp::OnInit() )
+        return false;
+
+    SetAppName("git-sum");
 
     if ( m_selfTest )
     {
@@ -60,7 +132,16 @@ bool GitSumApp::OnInit()
         }
 #endif
         SetExitOnFrameDelete(false);
-        m_selfTestCode = GitSumFrame::RunSelfTest() ? 0 : 1;
+        const bool passed = GitSumFrame::RunSelfTest();
+        wxString asserts;
+        if ( SelfTestHadAssert(asserts) )
+        {
+            const wxScopedCharBuffer buf = ("git-sum self-test failed: wx assert\n" + asserts).utf8_str();
+            std::fprintf(stderr, "%s", buf.data() ? buf.data() : "");
+            m_selfTestCode = 1;
+        }
+        else
+            m_selfTestCode = passed ? 0 : 1;
         return true;
     }
 

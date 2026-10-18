@@ -105,6 +105,7 @@ private:
     };
 
     void ShowDirectory(const wxString& path, bool updateTree);
+    void ShowDrives();
     void ShowPane(Pane pane);
     void RefreshPane();
     void SyncToggles();
@@ -175,6 +176,7 @@ private:
     int m_statusSortColumn;
     bool m_statusSortAscending;
     wxString m_currentDir;
+    bool m_drivesView;
     wxArrayString m_copiedPaths;
     std::vector<Entry> m_entries;
     std::vector<wxString> m_logMessages;
