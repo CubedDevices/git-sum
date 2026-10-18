@@ -34,6 +34,7 @@
 
 #include <vector>
 
+class DiffView;
 class wxGenericDirCtrl;
 class wxListCtrl;
 class wxPanel;
@@ -79,7 +80,8 @@ public:
         ID_GIT_PUSH,
         ID_GIT_PULL,
         ID_GIT_FETCH,
-        ID_GIT_INIT
+        ID_GIT_INIT,
+        ID_DIFF_BACK
     };
 
 private:
@@ -117,6 +119,9 @@ private:
     void FillLog();
     void ShowCommitMessage(long index);
     void ShowCommitFiles(long index);
+    void ApplyRightLayout();
+    void ShowWorktreeDiff(const wxString& fullId, const wxString& shortId, const wxString& relativePath);
+    void HideWorktreeDiff();
     void RefreshTree();
     void GoUp();
     void UpdateCommandState();
@@ -163,6 +168,9 @@ private:
     void OnListKey(wxKeyEvent& event);
     void OnListContext(wxContextMenuEvent& event);
     void OnListColumn(wxListEvent& event);
+    void OnCommitFileActivated(wxListEvent& event);
+    void OnDiffBack(wxCommandEvent& event);
+    void OnDiffKey(wxKeyEvent& event);
 
     GitSumConfig m_config;
     wxGenericDirCtrl* m_dirCtrl;
@@ -170,6 +178,10 @@ private:
     wxStaticText* m_summary;
     wxListCtrl* m_commitFiles;
     wxTextCtrl* m_commitMessage;
+    wxPanel* m_diffPanel;
+    DiffView* m_diffView;
+    wxStaticText* m_diffTitle;
+    bool m_diffVisible;
     wxListCtrl* m_list;
     wxTextCtrl* m_address;
     Pane m_pane;

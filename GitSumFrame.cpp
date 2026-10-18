@@ -25,13 +25,19 @@
 #include "GitSumFrame.h"
 
 #include "GitSumApp.h"
+#include "GitDiff.h"
 #include "GitFetch.h"
 #include "GitLog.h"
 #include "GitStatus.h"
 
 #include "git2.h"
 
+#include <algorithm>
+
 #include "wx/artprov.h"
+#include "wx/button.h"
+#include "wx/dcbuffer.h"
+#include "wx/scrolwin.h"
 #include "wx/dir.h"
 #include "wx/dirctrl.h"
 #include "wx/file.h"
@@ -399,6 +405,131 @@ bool Fail(const wxString& message)
 
 } // namespace
 
+class DiffView : public wxScrolledWindow
+{
+public:
+    DiffView(wxWindow* parent)
+        : wxScrolledWindow(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE)
+    {
+        SetBackgroundColour(*wxWHITE);
+        SetFont(wxFontInfo(10).Family(wxFONTFAMILY_TELETYPE));
+        wxClientDC dc(this);
+        dc.SetFont(GetFont());
+        m_charWidth = dc.GetCharWidth();
+        m_lineHeight = dc.GetCharHeight() + 4;
+        if ( m_charWidth < 1 )
+            m_charWidth = 8;
+        if ( m_lineHeight < 8 )
+            m_lineHeight = 16;
+        m_gutter = m_charWidth * 12;
+        SetScrollRate(m_charWidth, m_lineHeight);
+        Bind(wxEVT_PAINT, &DiffView::OnPaint, this);
+    }
+
+    void SetDiff(const GitWorktreeDiff& diff)
+    {
+        m_diff = diff;
+        int columns = 48;
+        for ( size_t i = 0; i < m_diff.lines.size(); ++i )
+            columns = std::max(columns, static_cast<int>(m_diff.lines[i].text.length()) + 16);
+        const int rows = std::max(1, static_cast<int>(m_diff.lines.empty() ? 1 : m_diff.lines.size()));
+        SetScrollbars(m_charWidth, m_lineHeight, columns, rows, 0, 0);
+        Refresh();
+    }
+
+    bool Contains(GitDiffLine::Kind kind, const wxString& text) const
+    {
+        for ( size_t i = 0; i < m_diff.lines.size(); ++i )
+        {
+            if ( m_diff.lines[i].kind == kind && m_diff.lines[i].text.Contains(text) )
+                return true;
+        }
+        return false;
+    }
+
+private:
+    void OnPaint(wxPaintEvent&)
+    {
+        wxBufferedPaintDC dc(this);
+        DoPrepareDC(dc);
+        dc.SetFont(GetFont());
+
+        int viewX = 0;
+        int viewY = 0;
+        GetViewStart(&viewX, &viewY);
+        const int visible = GetClientSize().GetHeight() / m_lineHeight + 2;
+        const int width = std::max(GetClientSize().GetWidth() + viewX * m_charWidth, m_gutter + 200);
+
+        if ( m_diff.lines.empty() )
+        {
+            dc.SetTextForeground(wxColour(80, 90, 100));
+            wxString message = m_diff.error;
+            if ( message.empty() && m_diff.binary )
+                message = "This file looks binary, so a text diff is not shown.";
+            if ( message.empty() && m_diff.identical )
+                message = "The working tree matches this commit.";
+            if ( message.empty() )
+                message = "No diff to show.";
+            dc.DrawText(message, 16, 16);
+            return;
+        }
+
+        const int first = std::max(0, viewY);
+        const int last = std::min(static_cast<int>(m_diff.lines.size()), first + visible);
+        for ( int i = first; i < last; ++i )
+        {
+            const GitDiffLine& line = m_diff.lines[static_cast<size_t>(i)];
+            wxColour background(255, 255, 255);
+            wxColour foreground(31, 35, 40);
+            wxString marker;
+            if ( line.kind == GitDiffLine::Kind::Addition )
+            {
+                background = wxColour(230, 255, 237);
+                foreground = wxColour(17, 99, 41);
+                marker = "+";
+            }
+            else if ( line.kind == GitDiffLine::Kind::Deletion )
+            {
+                background = wxColour(255, 235, 233);
+                foreground = wxColour(130, 7, 30);
+                marker = "-";
+            }
+            else if ( line.kind == GitDiffLine::Kind::Hunk )
+            {
+                background = wxColour(221, 244, 255);
+                foreground = wxColour(5, 80, 174);
+            }
+
+            const int y = i * m_lineHeight;
+            dc.SetPen(*wxTRANSPARENT_PEN);
+            dc.SetBrush(wxBrush(background));
+            dc.DrawRectangle(0, y, width, m_lineHeight);
+            dc.SetBrush(wxBrush(wxColour(246, 248, 250)));
+            dc.DrawRectangle(0, y, m_gutter, m_lineHeight);
+            dc.SetPen(wxPen(wxColour(208, 215, 222)));
+            dc.DrawLine(m_gutter, y, m_gutter, y + m_lineHeight);
+
+            dc.SetTextForeground(wxColour(101, 109, 118));
+            if ( line.kind != GitDiffLine::Kind::Hunk )
+            {
+                if ( line.oldLine > 0 )
+                    dc.DrawText(wxString::Format("%4d", line.oldLine), 4, y + 2);
+                if ( line.newLine > 0 )
+                    dc.DrawText(wxString::Format("%4d", line.newLine), m_charWidth * 5, y + 2);
+                dc.SetTextForeground(foreground);
+                dc.DrawText(marker, m_gutter - m_charWidth - 4, y + 2);
+            }
+            dc.SetTextForeground(foreground);
+            dc.DrawText(line.text, m_gutter + 8, y + 2);
+        }
+    }
+
+    GitWorktreeDiff m_diff;
+    int m_charWidth;
+    int m_lineHeight;
+    int m_gutter;
+};
+
 GitSumFrame::GitSumFrame(const GitSumConfig& config, bool silentNotices)
     : wxFrame(nullptr, wxID_ANY, "git-sum", wxDefaultPosition, wxSize(1020, 680))
     , m_config(config)
@@ -407,6 +538,10 @@ GitSumFrame::GitSumFrame(const GitSumConfig& config, bool silentNotices)
     , m_summary(nullptr)
     , m_commitFiles(nullptr)
     , m_commitMessage(nullptr)
+    , m_diffPanel(nullptr)
+    , m_diffView(nullptr)
+    , m_diffTitle(nullptr)
+    , m_diffVisible(false)
     , m_list(nullptr)
     , m_address(nullptr)
     , m_pane(Pane::Files)
@@ -474,6 +609,10 @@ GitSumFrame::~GitSumFrame()
         m_list->Unbind(wxEVT_CONTEXT_MENU, &GitSumFrame::OnListContext, this);
         m_list->Unbind(wxEVT_LIST_COL_CLICK, &GitSumFrame::OnListColumn, this);
     }
+    if ( m_commitFiles )
+        m_commitFiles->Unbind(wxEVT_LIST_ITEM_ACTIVATED, &GitSumFrame::OnCommitFileActivated, this);
+    if ( m_diffPanel )
+        m_diffPanel->Unbind(wxEVT_CHAR_HOOK, &GitSumFrame::OnDiffKey, this);
 }
 
 void GitSumFrame::BuildMenus()
@@ -531,26 +670,34 @@ void GitSumFrame::BuildMenus()
 
 void GitSumFrame::BuildToolBar()
 {
-    wxToolBar* bar = CreateToolBar(wxTB_FLAT | wxTB_TEXT | wxTB_HORZ_LAYOUT);
-    bar->AddTool(ID_UP, "Up", wxArtProvider::GetBitmap(wxART_GO_UP, wxART_TOOLBAR), "Up one folder");
+    // Icons only. Text beside each icon made the bar wider than the window,
+    // so later buttons were clipped. The tool name is the tooltip.
+    wxToolBar* bar = CreateToolBar(wxTB_FLAT | wxTB_HORIZONTAL);
+    const wxSize icon(16, 16);
+    bar->SetToolBitmapSize(icon);
+    const auto bitmap = [icon](const wxArtID& id)
+    {
+        return wxArtProvider::GetBitmap(id, wxART_TOOLBAR, icon);
+    };
+    bar->AddTool(ID_UP, "Up", bitmap(wxART_GO_UP), "Up one folder");
     bar->AddSeparator();
-    bar->AddTool(ID_NEW_FOLDER, "New folder", wxArtProvider::GetBitmap(wxART_NEW_DIR, wxART_TOOLBAR), "New folder");
-    bar->AddTool(ID_NEW_FILE, "New file", wxArtProvider::GetBitmap(wxART_NEW, wxART_TOOLBAR), "New file");
-    bar->AddTool(ID_COPY_PATHS, "Copy", wxArtProvider::GetBitmap(wxART_COPY, wxART_TOOLBAR), "Copy");
-    bar->AddTool(ID_PASTE_PATHS, "Paste", wxArtProvider::GetBitmap(wxART_PASTE, wxART_TOOLBAR), "Paste");
-    bar->AddTool(ID_DELETE_PATHS, "Delete", wxArtProvider::GetBitmap(wxART_DELETE, wxART_TOOLBAR), "Delete");
+    bar->AddTool(ID_NEW_FOLDER, "New folder", bitmap(wxART_NEW_DIR), "New folder");
+    bar->AddTool(ID_NEW_FILE, "New file", bitmap(wxART_NEW), "New file");
+    bar->AddTool(ID_COPY_PATHS, "Copy", bitmap(wxART_COPY), "Copy");
+    bar->AddTool(ID_PASTE_PATHS, "Paste", bitmap(wxART_PASTE), "Paste");
+    bar->AddTool(ID_DELETE_PATHS, "Delete", bitmap(wxART_DELETE), "Delete");
     bar->AddSeparator();
-    bar->AddTool(ID_GIT_INIT, "Init", wxArtProvider::GetBitmap(wxART_NEW_DIR, wxART_TOOLBAR), "Initialize a Git repository");
-    bar->AddTool(ID_GIT_STATUS, "Status", wxArtProvider::GetBitmap(wxART_LIST_VIEW, wxART_TOOLBAR),
+    bar->AddTool(ID_GIT_INIT, "Init", bitmap(wxART_NEW_DIR), "Initialize a Git repository");
+    bar->AddTool(ID_GIT_STATUS, "Status", bitmap(wxART_LIST_VIEW),
                  wxNullBitmap, wxITEM_CHECK, "Show or hide status");
-    bar->AddTool(ID_GIT_ADD, "Add", wxArtProvider::GetBitmap(wxART_PLUS, wxART_TOOLBAR), "Add");
-    bar->AddTool(ID_GIT_COMMIT, "Commit", wxArtProvider::GetBitmap(wxART_TICK_MARK, wxART_TOOLBAR), "Commit");
-    bar->AddTool(ID_GIT_DIFF, "Diff", wxArtProvider::GetBitmap(wxART_FIND, wxART_TOOLBAR), "Diff");
-    bar->AddTool(ID_GIT_LOG, "Log", wxArtProvider::GetBitmap(wxART_HELP_BOOK, wxART_TOOLBAR),
+    bar->AddTool(ID_GIT_ADD, "Add", bitmap(wxART_PLUS), "Add");
+    bar->AddTool(ID_GIT_COMMIT, "Commit", bitmap(wxART_TICK_MARK), "Commit");
+    bar->AddTool(ID_GIT_DIFF, "Diff", bitmap(wxART_FIND), "Diff");
+    bar->AddTool(ID_GIT_LOG, "Log", bitmap(wxART_HELP_BOOK),
                  wxNullBitmap, wxITEM_CHECK, "Show or hide log");
-    bar->AddTool(ID_GIT_FETCH, "Fetch", wxArtProvider::GetBitmap(wxART_REDO, wxART_TOOLBAR), "Fetch from remotes");
-    bar->AddTool(ID_GIT_PUSH, "Push", wxArtProvider::GetBitmap(wxART_GO_UP, wxART_TOOLBAR), "Push");
-    bar->AddTool(ID_GIT_PULL, "Pull", wxArtProvider::GetBitmap(wxART_GO_DOWN, wxART_TOOLBAR), "Pull");
+    bar->AddTool(ID_GIT_FETCH, "Fetch", bitmap(wxART_REDO), "Fetch from remotes");
+    bar->AddTool(ID_GIT_PUSH, "Push", bitmap(wxART_GO_UP), "Push");
+    bar->AddTool(ID_GIT_PULL, "Pull", bitmap(wxART_GO_DOWN), "Pull");
     bar->Realize();
 
     Bind(wxEVT_TOOL, &GitSumFrame::OnUp, this, ID_UP);
@@ -605,6 +752,26 @@ void GitSumFrame::BuildBody()
     m_commitMessage->Hide();
     rightSizer->Add(m_commitMessage, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
     rightSizer->Hide(m_commitMessage);
+
+    m_diffPanel = new wxPanel(m_right, wxID_ANY);
+    m_diffPanel->SetBackgroundColour(wxColour(246, 248, 250));
+    wxBoxSizer* diffSizer = new wxBoxSizer(wxVERTICAL);
+    wxBoxSizer* diffHeader = new wxBoxSizer(wxHORIZONTAL);
+    wxButton* back = new wxButton(m_diffPanel, ID_DIFF_BACK, "Back to log");
+    diffHeader->Add(back, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
+    m_diffTitle = new wxStaticText(m_diffPanel, wxID_ANY, wxString());
+    diffHeader->Add(m_diffTitle, 1, wxALIGN_CENTER_VERTICAL);
+    diffSizer->Add(diffHeader, 0, wxEXPAND | wxALL, 8);
+    wxStaticText* legend = new wxStaticText(m_diffPanel, wxID_ANY,
+                                             "Red is only in this commit.  Green is only in the working tree.");
+    legend->SetForegroundColour(wxColour(80, 90, 100));
+    diffSizer->Add(legend, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+    m_diffView = new DiffView(m_diffPanel);
+    diffSizer->Add(m_diffView, 1, wxEXPAND);
+    m_diffPanel->SetSizer(diffSizer);
+    m_diffPanel->Hide();
+    rightSizer->Add(m_diffPanel, 1, wxEXPAND);
+    rightSizer->Hide(m_diffPanel);
     m_right->SetSizer(rightSizer);
 
     wxImageList* images = new wxImageList(16, 16, true);
@@ -624,6 +791,9 @@ void GitSumFrame::BuildBody()
     m_list->Bind(wxEVT_KEY_DOWN, &GitSumFrame::OnListKey, this);
     m_list->Bind(wxEVT_CONTEXT_MENU, &GitSumFrame::OnListContext, this);
     m_list->Bind(wxEVT_LIST_COL_CLICK, &GitSumFrame::OnListColumn, this);
+    m_commitFiles->Bind(wxEVT_LIST_ITEM_ACTIVATED, &GitSumFrame::OnCommitFileActivated, this);
+    m_diffPanel->Bind(wxEVT_CHAR_HOOK, &GitSumFrame::OnDiffKey, this);
+    Bind(wxEVT_BUTTON, &GitSumFrame::OnDiffBack, this, ID_DIFF_BACK);
 }
 
 void GitSumFrame::BindDirEvents()
@@ -775,16 +945,8 @@ void GitSumFrame::RefreshPane()
         m_columns = m_pane;
     }
 
-    if ( m_summary )
-        m_summary->Show(m_pane != Pane::Files);
-    if ( m_right && m_right->GetSizer() )
-    {
-        const bool log = m_pane == Pane::Log;
-        if ( m_commitFiles )
-            m_right->GetSizer()->Show(m_commitFiles, log);
-        if ( m_commitMessage )
-            m_right->GetSizer()->Show(m_commitMessage, log);
-    }
+    m_diffVisible = false;
+    ApplyRightLayout();
 
     if ( m_pane == Pane::Files )
         FillList();
@@ -1126,6 +1288,94 @@ void GitSumFrame::ShowCommitFiles(long index)
         const long row = m_commitFiles->InsertItem(m_commitFiles->GetItemCount(), files.files[i].status);
         m_commitFiles->SetItem(row, 1, files.files[i].path);
     }
+}
+
+void GitSumFrame::ApplyRightLayout()
+{
+    if ( !m_right || !m_right->GetSizer() )
+        return;
+    wxSizer* sizer = m_right->GetSizer();
+    const bool diff = m_pane == Pane::Log && m_diffVisible;
+    const bool log = m_pane == Pane::Log && !diff;
+    if ( m_summary )
+        sizer->Show(m_summary, m_pane != Pane::Files && !diff);
+    if ( m_list )
+        sizer->Show(m_list, !diff);
+    if ( m_commitFiles )
+        sizer->Show(m_commitFiles, log);
+    if ( m_commitMessage )
+        sizer->Show(m_commitMessage, log);
+    if ( m_diffPanel )
+        sizer->Show(m_diffPanel, diff);
+}
+
+void GitSumFrame::ShowWorktreeDiff(const wxString& fullId, const wxString& shortId, const wxString& relativePath)
+{
+    const GitWorktreeDiff diff = QueryWorktreeDiff(m_currentDir, fullId, relativePath);
+    if ( m_diffView )
+        m_diffView->SetDiff(diff);
+    if ( m_diffTitle )
+    {
+        wxString title = relativePath;
+        if ( !shortId.empty() )
+            title += "    " + shortId;
+        title += "  compared with the working tree";
+        m_diffTitle->SetLabel(title);
+    }
+    m_diffVisible = true;
+    ApplyRightLayout();
+    if ( m_right )
+        m_right->Layout();
+    if ( m_diffView )
+        m_diffView->SetFocus();
+}
+
+void GitSumFrame::HideWorktreeDiff()
+{
+    if ( !m_diffVisible )
+        return;
+    m_diffVisible = false;
+    ApplyRightLayout();
+    if ( m_right )
+        m_right->Layout();
+}
+
+void GitSumFrame::OnCommitFileActivated(wxListEvent& event)
+{
+    if ( m_settingPath || IsBeingDeleted() || m_pane != Pane::Log )
+        return;
+    const long index = event.GetIndex();
+    if ( index < 0 || !m_commitFiles )
+        return;
+    wxString path = m_commitFiles->GetItemText(index, 1);
+    const wxString status = m_commitFiles->GetItemText(index, 0);
+    if ( path.empty() || status.empty() )
+        return;
+    const int arrow = path.Find(" -> ");
+    if ( arrow != wxNOT_FOUND )
+        path = path.Mid(arrow + 4);
+
+    long commit = m_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+    if ( commit < 0 )
+        commit = 0;
+    if ( commit < 0 || static_cast<size_t>(commit) >= m_logIds.size() )
+        return;
+    ShowWorktreeDiff(m_logIds[static_cast<size_t>(commit)], m_list->GetItemText(commit, 0), path);
+}
+
+void GitSumFrame::OnDiffBack(wxCommandEvent&)
+{
+    HideWorktreeDiff();
+}
+
+void GitSumFrame::OnDiffKey(wxKeyEvent& event)
+{
+    if ( m_diffVisible && event.GetKeyCode() == WXK_ESCAPE )
+    {
+        HideWorktreeDiff();
+        return;
+    }
+    event.Skip();
 }
 
 void GitSumFrame::RefreshTree()
@@ -1884,6 +2134,9 @@ bool GitSumFrame::RunSelfTest()
 
     if ( frame->CommandEnabled(ID_GIT_STATUS) || frame->m_currentDir.IsEmpty() )
         return Fail("Git commands should be disabled in a normal folder");
+    const int toolbarWidth = frame->GetToolBar()->GetBestSize().GetWidth();
+    if ( toolbarWidth <= 0 || toolbarWidth > frame->GetSize().GetWidth() )
+        return Fail(wxString::Format("toolbar width %d exceeds the window", toolbarWidth));
 #ifdef __WXMSW__
     frame->ShowDrives();
     if ( !frame->m_drivesView || frame->m_entries.empty() || frame->CommandEnabled(ID_UP) )
@@ -2300,6 +2553,29 @@ bool GitSumFrame::RunSelfTest()
     }
     if ( !sawHelloFile || sawNestedInInitial )
         return Fail("selecting a commit did not show its files");
+    if ( !WriteAll(JoinPath(live, "hello.txt"), "hello\nworld\n") )
+        return Fail("could not change hello.txt for the diff");
+    long helloRow = -1;
+    for ( long fileRow = 0; fileRow < frame->m_commitFiles->GetItemCount(); ++fileRow )
+    {
+        if ( frame->m_commitFiles->GetItemText(fileRow, 1) == "hello.txt" )
+            helloRow = fileRow;
+    }
+    if ( helloRow < 0 )
+        return Fail("could not find hello.txt to diff");
+    wxListEvent activate(wxEVT_LIST_ITEM_ACTIVATED, frame->m_commitFiles->GetId());
+    activate.SetIndex(helloRow);
+    frame->OnCommitFileActivated(activate);
+    if ( !frame->m_diffVisible || !frame->m_diffPanel->IsShown() || frame->m_list->IsShown() ||
+         !frame->m_diffTitle->GetLabel().Contains("hello.txt") ||
+         !frame->m_diffView->Contains(GitDiffLine::Kind::Addition, "world") )
+        return Fail("double-click did not diff the commit file against the working tree");
+    wxCommandEvent back;
+    frame->OnDiffBack(back);
+    if ( frame->m_diffVisible || !frame->m_commitFiles->IsShown() || !frame->m_list->IsShown() )
+        return Fail("Back to log did not restore the log view");
+    if ( !WriteAll(JoinPath(live, "hello.txt"), "hello") )
+        return Fail("could not restore hello.txt");
 
     const GitLogResult nestedHistory = QueryGitLog(liveSub);
     if ( !nestedHistory.ok || nestedHistory.rows.size() != 1 ||

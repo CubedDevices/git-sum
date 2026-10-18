@@ -100,6 +100,7 @@
     <ClCompile Include="..\..\GitStatus.cpp" />
     <ClCompile Include="..\..\GitLog.cpp" />
     <ClCompile Include="..\..\GitFetch.cpp" />
+    <ClCompile Include="..\..\GitDiff.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\GitSumApp.h" />
@@ -108,6 +109,7 @@
     <ClInclude Include="..\..\GitStatus.h" />
     <ClInclude Include="..\..\GitLog.h" />
     <ClInclude Include="..\..\GitFetch.h" />
+    <ClInclude Include="..\..\GitDiff.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

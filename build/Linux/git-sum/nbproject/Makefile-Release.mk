@@ -40,7 +40,8 @@ OBJECTFILES= \
 	${OBJECTDIR}/_ext/7ea65360/GitSumFrame.o \
 	${OBJECTDIR}/_ext/7ea65360/GitStatus.o \
 	${OBJECTDIR}/_ext/7ea65360/GitLog.o \
-	${OBJECTDIR}/_ext/7ea65360/GitFetch.o
+	${OBJECTDIR}/_ext/7ea65360/GitFetch.o \
+	${OBJECTDIR}/_ext/7ea65360/GitDiff.o
 
 
 # C Compiler Flags
@@ -96,6 +97,11 @@ ${OBJECTDIR}/_ext/7ea65360/GitFetch.o: ../../../GitFetch.cpp
 	${MKDIR} -p ${OBJECTDIR}/_ext/7ea65360
 	${RM} "$@.d"
 	$(COMPILE.cc) -O2 -I../../.. -MMD -MP -MF "$@.d" -o ${OBJECTDIR}/_ext/7ea65360/GitFetch.o ../../../GitFetch.cpp
+
+${OBJECTDIR}/_ext/7ea65360/GitDiff.o: ../../../GitDiff.cpp
+	${MKDIR} -p ${OBJECTDIR}/_ext/7ea65360
+	${RM} "$@.d"
+	$(COMPILE.cc) -O2 -I../../.. -MMD -MP -MF "$@.d" -o ${OBJECTDIR}/_ext/7ea65360/GitDiff.o ../../../GitDiff.cpp
 
 # Subprojects
 .build-subprojects:
