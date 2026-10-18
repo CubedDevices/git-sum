@@ -24,6 +24,7 @@
 /////////////////////////////////////////////////////////////////////////////
 #include "GitSumFrame.h"
 
+#include "GitSumApp.h"
 #include "GitFetch.h"
 #include "GitLog.h"
 #include "GitStatus.h"
@@ -48,6 +49,9 @@
 #include "wx/textdlg.h"
 #include "wx/textctrl.h"
 #include "wx/toolbar.h"
+#ifdef __WXMSW__
+#include "wx/msw/wrapwin.h"
+#endif
 #include "wx/treectrl.h"
 
 #include <algorithm>
@@ -109,6 +113,35 @@ bool IsVolumeRoot(const wxString& path)
     dir.Normalize(wxPATH_NORM_ABSOLUTE | wxPATH_NORM_DOTS);
     return dir.GetDirCount() == 0;
 }
+
+#ifdef __WXMSW__
+wxArrayString HardDrives()
+{
+    wxArrayString drives;
+    const DWORD chars = ::GetLogicalDriveStrings(0, nullptr);
+    if ( chars == 0 )
+        return drives;
+    wxWCharBuffer buf(static_cast<size_t>(chars) + 1);
+    if ( ::GetLogicalDriveStrings(chars, buf.data()) == 0 )
+        return drives;
+    for ( const wchar_t* volume = buf.data(); volume && *volume; volume += wxStrlen(volume) + 1 )
+    {
+        if ( ::GetDriveType(volume) == DRIVE_FIXED )
+            drives.Add(volume);
+    }
+    return drives;
+}
+
+wxString DriveLabel(const wxString& root)
+{
+    const wxString letter = root.Left(2);
+    wxChar label[256] = { 0 };
+    if ( ::GetVolumeInformation(root.t_str(), label, WXSIZEOF(label), nullptr, nullptr, nullptr, nullptr, 0) &&
+         label[0] )
+        return wxString(label) + " (" + letter + ")";
+    return "Local Disk (" + letter + ")";
+}
+#endif
 
 bool IsGitControlledDirectory(const wxString& path)
 {
@@ -380,14 +413,21 @@ GitSumFrame::GitSumFrame(const GitSumConfig& config, bool silentNotices)
     , m_columns(Pane::Files)
     , m_statusSortColumn(0)
     , m_statusSortAscending(true)
+    , m_drivesView(false)
     , m_settingPath(false)
     , m_silentNotices(silentNotices)
     , m_scriptedAnswer(0)
 {
     wxString start = m_config.LastPath();
-    if ( !wxFileName::DirExists(start) )
+    const bool haveStart = wxFileName::DirExists(start);
+#ifdef __WXMSW__
+    if ( haveStart )
+        m_currentDir = start;
+#else
+    if ( !haveStart )
         start = wxGetHomeDir();
     m_currentDir = start;
+#endif
 
     CreateStatusBar(3);
     const int widths[3] = { -1, 160, 120 };
@@ -403,7 +443,12 @@ GitSumFrame::GitSumFrame(const GitSumConfig& config, bool silentNotices)
     BindDirEvents();
 
     Bind(wxEVT_CLOSE_WINDOW, &GitSumFrame::OnClose, this);
-    ShowDirectory(m_currentDir, true);
+#ifdef __WXMSW__
+    if ( !haveStart )
+        ShowDrives();
+    else
+#endif
+        ShowDirectory(m_currentDir, true);
     SetMinSize(wxSize(640, 400));
     Centre();
 }
@@ -645,9 +690,37 @@ void GitSumFrame::ShowDirectory(const wxString& path, bool updateTree)
     m_logTarget = m_currentDir;
     if ( m_pane != Pane::Files && !IsGitControlledDirectory(m_currentDir) )
         m_pane = Pane::Files;
+    m_drivesView = false;
     SyncToggles();
     RefreshPane();
     UpdateCommandState();
+}
+
+void GitSumFrame::ShowDrives()
+{
+#ifndef __WXMSW__
+    return;
+#else
+    m_drivesView = true;
+    m_currentDir.clear();
+    m_logTarget.clear();
+    if ( m_pane != Pane::Files )
+        m_pane = Pane::Files;
+    SetTitle("git-sum");
+    if ( m_address )
+        m_address->ChangeValue("Computer");
+    if ( m_dirCtrl )
+    {
+        m_settingPath = true;
+        m_dirCtrl->CollapseTree();
+        if ( wxTreeCtrl* tree = m_dirCtrl->GetTreeCtrl() )
+            tree->Unselect();
+        m_settingPath = false;
+    }
+    SyncToggles();
+    RefreshPane();
+    UpdateCommandState();
+#endif
 }
 
 void GitSumFrame::ShowPane(Pane pane)
@@ -779,9 +852,35 @@ void GitSumFrame::SetSummary(const wxString& text)
 
 void GitSumFrame::FillList()
 {
+    // Some files, such as protected files in a drive root, refuse timestamp
+    // queries. A log dialog here would cancel the tree expansion in progress.
+    wxLogNull quiet;
+
     m_entries.clear();
     m_list->Freeze();
     m_list->DeleteAllItems();
+
+#ifdef __WXMSW__
+    if ( m_drivesView )
+    {
+        const wxArrayString drives = HardDrives();
+        for ( size_t i = 0; i < drives.GetCount(); ++i )
+        {
+            Entry entry;
+            entry.name = DriveLabel(drives[i]);
+            entry.path = drives[i];
+            entry.isDir = true;
+            m_entries.push_back(entry);
+            const long row = m_list->InsertItem(m_list->GetItemCount(), entry.name, 0);
+            m_list->SetItem(row, 1, wxString());
+            m_list->SetItem(row, 2, wxString());
+        }
+        m_list->Thaw();
+        SetStatusText("Computer", 0);
+        SetStatusText(wxString::Format("%u drives", static_cast<unsigned>(m_entries.size())), 2);
+        return;
+    }
+#endif
 
     wxDir dir(m_currentDir);
     if ( !dir.IsOpened() )
@@ -1041,8 +1140,15 @@ void GitSumFrame::RefreshTree()
 
 void GitSumFrame::GoUp()
 {
-    if ( IsVolumeRoot(m_currentDir) )
+    if ( m_drivesView )
         return;
+    if ( IsVolumeRoot(m_currentDir) )
+    {
+#ifdef __WXMSW__
+        ShowDrives();
+#endif
+        return;
+    }
     wxFileName dir;
     dir.AssignDir(m_currentDir);
     dir.RemoveLastDir();
@@ -1057,7 +1163,11 @@ void GitSumFrame::UpdateCommandState()
     const bool git = !gitPath.empty() && IsGitControlledDirectory(gitPath);
     const wxString logPath = GitLogPath();
     const bool canLog = !logPath.empty() && IsGitControlledPath(logPath);
+#ifdef __WXMSW__
+    const bool canUp = !m_drivesView && !m_currentDir.empty();
+#else
     const bool canUp = !IsVolumeRoot(m_currentDir);
+#endif
 
     GetMenuBar()->Enable(ID_COPY_PATHS, haveSelection);
     GetMenuBar()->Enable(ID_PASTE_PATHS, canPaste);
@@ -1153,9 +1263,15 @@ wxString GitSumFrame::GitLogPath() const
 
 bool GitSumFrame::CommandEnabled(int id) const
 {
-    const bool menu = GetMenuBar() && GetMenuBar()->IsEnabled(id);
-    const bool tool = GetToolBar() && GetToolBar()->GetToolEnabled(id);
-    return menu && tool;
+    const bool onMenu = GetMenuBar() && GetMenuBar()->FindItem(id);
+    const bool onTool = GetToolBar() && GetToolBar()->FindById(id);
+    if ( !onMenu && !onTool )
+        return false;
+    if ( onMenu && !GetMenuBar()->IsEnabled(id) )
+        return false;
+    if ( onTool && !GetToolBar()->GetToolEnabled(id) )
+        return false;
+    return true;
 }
 
 void GitSumFrame::Notify(const wxString& message, int icon)
@@ -1195,6 +1311,11 @@ void GitSumFrame::PasteClipboard()
     }
 
     const wxString destDir = TargetDirectory();
+    if ( destDir.empty() )
+    {
+        Notify("Select a folder.", wxICON_INFORMATION);
+        return;
+    }
     unsigned pasted = 0;
     for ( size_t i = 0; i < m_copiedPaths.GetCount(); ++i )
     {
@@ -1247,6 +1368,11 @@ void GitSumFrame::PasteClipboard()
 
 bool GitSumFrame::CreateFolder(const wxString& name)
 {
+    if ( TargetDirectory().empty() )
+    {
+        Notify("Select a folder.", wxICON_INFORMATION);
+        return false;
+    }
     wxString error;
     if ( !ValidNewName(name, error) )
     {
@@ -1272,6 +1398,11 @@ bool GitSumFrame::CreateFolder(const wxString& name)
 
 bool GitSumFrame::CreateFile(const wxString& name)
 {
+    if ( TargetDirectory().empty() )
+    {
+        Notify("Select a folder.", wxICON_INFORMATION);
+        return false;
+    }
     wxString error;
     if ( !ValidNewName(name, error) )
     {
@@ -1426,13 +1557,21 @@ void GitSumFrame::PopupContextMenu()
 
 void GitSumFrame::OnClose(wxCloseEvent& event)
 {
-    m_config.SetLastPath(m_currentDir);
+    if ( !m_drivesView )
+        m_config.SetLastPath(m_currentDir);
     m_config.Save();
     event.Skip();
 }
 
 void GitSumFrame::OnAddressEnter(wxCommandEvent&)
 {
+#ifdef __WXMSW__
+    if ( m_address->GetValue().CmpNoCase("Computer") == 0 )
+    {
+        ShowDrives();
+        return;
+    }
+#endif
     ShowDirectory(m_address->GetValue(), true);
 }
 
@@ -1728,6 +1867,43 @@ bool GitSumFrame::RunSelfTest()
 
     if ( frame->CommandEnabled(ID_GIT_STATUS) || frame->m_currentDir.IsEmpty() )
         return Fail("Git commands should be disabled in a normal folder");
+#ifdef __WXMSW__
+    frame->ShowDrives();
+    if ( !frame->m_drivesView || frame->m_entries.empty() || frame->CommandEnabled(ID_UP) )
+        return Fail("Windows folder view did not show hard drives");
+    bool sawFixed = false;
+    for ( size_t i = 0; i < frame->m_entries.size(); ++i )
+    {
+        const wxString path = frame->m_entries[i].path;
+        if ( frame->m_entries[i].isDir && path.length() >= 3 && path[1] == ':' )
+            sawFixed = true;
+    }
+    if ( !sawFixed )
+        return Fail("hard drive list did not include a drive");
+    wxTreeCtrl* drivesTree = frame->m_dirCtrl->GetTreeCtrl();
+    const wxTreeItemId drivesRoot = drivesTree->GetRootItem();
+    bool treeDrive = false;
+    wxTreeItemIdValue drivesCookie;
+    for ( wxTreeItemId child = drivesTree->GetFirstChild(drivesRoot, drivesCookie);
+          child.IsOk(); child = drivesTree->GetNextChild(drivesRoot, drivesCookie) )
+    {
+        const wxString path = frame->m_dirCtrl->GetPath(child);
+        if ( path.length() >= 2 && path[1] == ':' )
+            treeDrive = true;
+    }
+    if ( !treeDrive )
+        return Fail("folder view did not list Windows drives");
+    const wxString firstDrive = frame->m_entries[0].path;
+    frame->ShowDirectory(firstDrive, true);
+    if ( frame->m_drivesView || !IsVolumeRoot(frame->m_currentDir) )
+        return Fail("opening a hard drive did not leave the drive list");
+    frame->GoUp();
+    if ( !frame->m_drivesView || !frame->m_address->GetValue().IsSameAs("Computer") )
+        return Fail("Up from a drive did not return to the hard drives");
+    frame->ShowDirectory(plain, true);
+    if ( frame->m_drivesView || !PathsEqual(frame->m_currentDir, plain) )
+        return Fail("could not return from the hard drives");
+#endif
     if ( !frame->CommandEnabled(ID_GIT_INIT) )
         return Fail("Init should be enabled in a normal folder");
     for ( int id : kGitIds )
@@ -2187,6 +2363,10 @@ bool GitSumFrame::RunSelfTest()
     if ( !RemoveTree(temp.path, removeError) || wxFileName::DirExists(temp.path) )
         return Fail(removeError.empty() ? wxString("could not remove self-test directory") : removeError);
     temp.path.clear();
+
+    wxString asserts;
+    if ( SelfTestHadAssert(asserts) )
+        return Fail(asserts);
 
     std::printf("git-sum self-test passed\n");
     return true;
