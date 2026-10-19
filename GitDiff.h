@@ -32,8 +32,8 @@
 /**
  * @brief One displayed row of a parent-to-commit diff.
  *
- * Additions are lines introduced by the commit. Deletions are lines that
- * existed only in the parent version.
+ * Additions are lines on the new side. Deletions are lines that existed
+ * only on the old side.
  */
 struct GitDiffLine
 {
@@ -52,7 +52,7 @@ struct GitDiffLine
 };
 
 /**
- * @brief Text diff of one path from its first parent into a commit.
+ * @brief Text diff of one file.
  */
 struct GitCommitDiff
 {
@@ -70,5 +70,10 @@ GitCommitDiff QueryCommitDiff(const wxString& directory,
                               const wxString& fullId,
                               const wxString& oldPath,
                               const wxString& newPath);
+
+/// Diff @a oldPath at HEAD against the working-tree file @a newPath.
+GitCommitDiff QueryHeadDiff(const wxString& directory,
+                            const wxString& oldPath,
+                            const wxString& newPath);
 
 #endif // GITDIFF_H

@@ -34,6 +34,7 @@
 
 #include <vector>
 
+struct GitCommitDiff;
 class DiffView;
 class wxGenericDirCtrl;
 class wxListCtrl;
@@ -122,6 +123,9 @@ private:
     void ApplyRightLayout();
     void ShowWorktreeDiff(const wxString& fullId, const wxString& shortId,
                           const wxString& oldPath, const wxString& newPath);
+    void ShowHeadDiff(const wxString& oldPath, const wxString& newPath);
+    void ShowDiff(const GitCommitDiff& diff, const wxString& title,
+                  const wxString& legend, const wxString& backLabel);
     void HideWorktreeDiff();
     void RefreshTree();
     void GoUp();
@@ -182,6 +186,7 @@ private:
     wxPanel* m_diffPanel;
     DiffView* m_diffView;
     wxStaticText* m_diffTitle;
+    wxStaticText* m_diffLegend;
     bool m_diffVisible;
     wxListCtrl* m_list;
     wxTextCtrl* m_address;

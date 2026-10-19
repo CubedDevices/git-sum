@@ -591,6 +591,7 @@ GitSumFrame::GitSumFrame(const GitSumConfig& config, bool silentNotices)
     , m_diffPanel(nullptr)
     , m_diffView(nullptr)
     , m_diffTitle(nullptr)
+    , m_diffLegend(nullptr)
     , m_diffVisible(false)
     , m_list(nullptr)
     , m_address(nullptr)
@@ -812,10 +813,10 @@ void GitSumFrame::BuildBody()
     m_diffTitle = new wxStaticText(m_diffPanel, wxID_ANY, wxString());
     diffHeader->Add(m_diffTitle, 1, wxALIGN_CENTER_VERTICAL);
     diffSizer->Add(diffHeader, 0, wxEXPAND | wxALL, 8);
-    wxStaticText* legend = new wxStaticText(m_diffPanel, wxID_ANY,
-                                             "Red is from the previous version.  Green was added by this commit.");
-    legend->SetForegroundColour(wxColour(80, 90, 100));
-    diffSizer->Add(legend, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+    m_diffLegend = new wxStaticText(m_diffPanel, wxID_ANY,
+                                    "Red is from the previous version.  Green was added by this commit.");
+    m_diffLegend->SetForegroundColour(wxColour(80, 90, 100));
+    diffSizer->Add(m_diffLegend, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
     m_diffView = new DiffView(m_diffPanel);
     diffSizer->Add(m_diffView, 1, wxEXPAND);
     m_diffPanel->SetSizer(diffSizer);
@@ -1345,7 +1346,7 @@ void GitSumFrame::ApplyRightLayout()
     if ( !m_right || !m_right->GetSizer() )
         return;
     wxSizer* sizer = m_right->GetSizer();
-    const bool diff = m_pane == Pane::Log && m_diffVisible;
+    const bool diff = m_diffVisible && (m_pane == Pane::Log || m_pane == Pane::Status);
     const bool log = m_pane == Pane::Log && !diff;
     if ( m_summary )
         sizer->Show(m_summary, m_pane != Pane::Files && !diff);
@@ -1359,26 +1360,48 @@ void GitSumFrame::ApplyRightLayout()
         sizer->Show(m_diffPanel, diff);
 }
 
-void GitSumFrame::ShowWorktreeDiff(const wxString& fullId, const wxString& shortId,
-                                    const wxString& oldPath, const wxString& newPath)
+void GitSumFrame::ShowDiff(const GitCommitDiff& diff, const wxString& title,
+                            const wxString& legend, const wxString& backLabel)
 {
-    const GitCommitDiff diff = QueryCommitDiff(m_currentDir, fullId, oldPath, newPath);
     if ( m_diffTitle )
-    {
-        wxString title = oldPath == newPath ? newPath : oldPath + " -> " + newPath;
-        if ( !shortId.empty() )
-            title += "    " + shortId;
-        title += "  changes in this commit";
         m_diffTitle->SetLabel(title);
+    if ( m_diffLegend )
+        m_diffLegend->SetLabel(legend);
+    if ( m_diffPanel )
+    {
+        if ( wxWindow* back = m_diffPanel->FindWindow(ID_DIFF_BACK) )
+            back->SetLabel(backLabel);
     }
     m_diffVisible = true;
     ApplyRightLayout();
     if ( m_right )
         m_right->Layout();
     if ( m_diffView )
+    {
         m_diffView->SetDiff(diff);
-    if ( m_diffView )
         m_diffView->SetFocus();
+    }
+}
+
+void GitSumFrame::ShowWorktreeDiff(const wxString& fullId, const wxString& shortId,
+                                    const wxString& oldPath, const wxString& newPath)
+{
+    wxString title = oldPath == newPath ? newPath : oldPath + " -> " + newPath;
+    if ( !shortId.empty() )
+        title += "    " + shortId;
+    title += "  changes in this commit";
+    ShowDiff(QueryCommitDiff(m_currentDir, fullId, oldPath, newPath), title,
+             "Red is from the previous version.  Green was added by this commit.",
+             "Back to log");
+}
+
+void GitSumFrame::ShowHeadDiff(const wxString& oldPath, const wxString& newPath)
+{
+    wxString title = oldPath == newPath ? newPath : oldPath + " -> " + newPath;
+    title += "  HEAD compared with the working tree";
+    ShowDiff(QueryHeadDiff(m_currentDir, oldPath, newPath), title,
+             "Red is in HEAD.  Green is only in the working tree.",
+             "Back to status");
 }
 
 void GitSumFrame::HideWorktreeDiff()
@@ -2019,6 +2042,31 @@ void GitSumFrame::OnDirRightClick(wxTreeEvent& event)
 
 void GitSumFrame::OnListActivated(wxListEvent& event)
 {
+    if ( m_pane == Pane::Status )
+    {
+        const long index = event.GetIndex();
+        if ( index < 0 || !m_list )
+            return;
+        const wxString path = m_list->GetItemText(index, 0);
+        if ( path.empty() )
+            return;
+        const auto renamedFrom = [](const wxString& text)
+        {
+            const int at = text.Find("from ");
+            if ( at == wxNOT_FOUND )
+                return wxString();
+            wxString oldPath = text.Mid(at + 5);
+            oldPath.Trim(true).Trim(false);
+            return oldPath;
+        };
+        wxString oldPath = renamedFrom(m_list->GetItemText(index, 2));
+        if ( oldPath.empty() )
+            oldPath = renamedFrom(m_list->GetItemText(index, 1));
+        if ( oldPath.empty() )
+            oldPath = path;
+        ShowHeadDiff(oldPath, path);
+        return;
+    }
     if ( m_pane != Pane::Files )
         return;
     const long index = event.GetIndex();
@@ -2498,6 +2546,24 @@ bool GitSumFrame::RunSelfTest()
     }
     if ( !sawUntracked )
         return Fail("status view did not list hello.txt as untracked");
+    long untrackedRow = -1;
+    for ( long row = 0; row < frame->m_list->GetItemCount(); ++row )
+    {
+        if ( frame->m_list->GetItemText(row, 0) == "hello.txt" )
+            untrackedRow = row;
+    }
+    wxListEvent openUntracked(wxEVT_LIST_ITEM_ACTIVATED, frame->m_list->GetId());
+    openUntracked.SetIndex(untrackedRow);
+    frame->OnListActivated(openUntracked);
+    if ( !frame->m_diffVisible || !frame->m_diffPanel->IsShown() || frame->m_list->IsShown() ||
+         !frame->m_diffTitle->GetLabel().Contains("hello.txt") ||
+         !frame->m_diffTitle->GetLabel().Contains("HEAD") ||
+         !frame->m_diffView->Contains(GitDiffLine::Kind::Addition, "hello") )
+        return Fail("double-click did not diff an untracked file against HEAD");
+    wxCommandEvent backFromUntracked;
+    frame->OnDiffBack(backFromUntracked);
+    if ( frame->m_diffVisible || !frame->m_list->IsShown() )
+        return Fail("Back to status did not restore the status view");
     if ( !frame->m_summary->IsShown() || !frame->m_summary->GetLabel().Contains("No commits yet") )
         return Fail("status summary did not describe the new repository");
 
@@ -2532,6 +2598,34 @@ bool GitSumFrame::RunSelfTest()
     if ( frame->m_list->GetItemCount() != 0 ||
          !frame->m_summary->GetLabel().Contains("nothing to commit") )
         return Fail("status view did not become clean after the commit");
+    if ( !WriteAll(JoinPath(live, "hello.txt"), "hello\nworld\n") )
+        return Fail("could not change hello.txt for the status diff");
+    frame->RefreshPane();
+    long modifiedRow = -1;
+    for ( long row = 0; row < frame->m_list->GetItemCount(); ++row )
+    {
+        if ( frame->m_list->GetItemText(row, 0) == "hello.txt" )
+            modifiedRow = row;
+    }
+    if ( modifiedRow < 0 )
+        return Fail("status did not list the modified hello.txt");
+    wxListEvent openModified(wxEVT_LIST_ITEM_ACTIVATED, frame->m_list->GetId());
+    openModified.SetIndex(modifiedRow);
+    frame->OnListActivated(openModified);
+    if ( !frame->m_diffVisible || !frame->m_diffPanel->IsShown() || frame->m_list->IsShown() ||
+         !frame->m_diffTitle->GetLabel().Contains("HEAD compared with the working tree") ||
+         !frame->m_diffLegend->GetLabel().Contains("working tree") ||
+         frame->m_diffView->Contains(GitDiffLine::Kind::Addition, "world") == false )
+        return Fail("double-click did not diff HEAD against the working tree");
+    wxCommandEvent backFromStatus;
+    frame->OnDiffBack(backFromStatus);
+    if ( frame->m_diffVisible || !frame->m_list->IsShown() )
+        return Fail("Back to status did not restore the status list");
+    if ( !WriteAll(JoinPath(live, "hello.txt"), "hello") )
+        return Fail("could not restore hello.txt after the status diff");
+    frame->RefreshPane();
+    if ( frame->m_list->GetItemCount() != 0 )
+        return Fail("status was not clean after restoring hello.txt");
 
     const wxString liveSub = JoinPath(live, "sub");
     if ( !wxFileName::Mkdir(liveSub) || !WriteAll(JoinPath(liveSub, "other.txt"), "other") )
