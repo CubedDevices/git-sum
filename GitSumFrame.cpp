@@ -423,17 +423,15 @@ public:
             m_lineHeight = 16;
         m_gutter = m_charWidth * 12;
         SetScrollRate(m_charWidth, m_lineHeight);
+        SetBackgroundStyle(wxBG_STYLE_PAINT);
         Bind(wxEVT_PAINT, &DiffView::OnPaint, this);
+        Bind(wxEVT_SIZE, &DiffView::OnSize, this);
     }
 
     void SetDiff(const GitCommitDiff& diff)
     {
         m_diff = diff;
-        int columns = 48;
-        for ( size_t i = 0; i < m_diff.lines.size(); ++i )
-            columns = std::max(columns, static_cast<int>(m_diff.lines[i].text.length()) + 16);
-        const int rows = std::max(1, static_cast<int>(m_diff.lines.empty() ? 1 : m_diff.lines.size()));
-        SetScrollbars(m_charWidth, m_lineHeight, columns, rows, 0, 0);
+        UpdateScrollbars(true);
         Refresh();
     }
 
@@ -448,17 +446,68 @@ public:
     }
 
 private:
+    void OnSize(wxSizeEvent& event)
+    {
+        UpdateScrollbars(false);
+        event.Skip();
+    }
+
+    void UpdateScrollbars(bool reset)
+    {
+        if ( m_updatingScroll )
+            return;
+        int columns = 48;
+        for ( size_t i = 0; i < m_diff.lines.size(); ++i )
+            columns = std::max(columns, static_cast<int>(m_diff.lines[i].text.length()) + 16);
+        const int contentRows = std::max(1, static_cast<int>(m_diff.lines.empty() ? 1 : m_diff.lines.size()));
+        const wxSize client = GetClientSize();
+        if ( client.GetWidth() > 0 )
+            columns = std::max(columns, (client.GetWidth() + m_charWidth - 1) / m_charWidth);
+        int rows = contentRows;
+        if ( client.GetHeight() > 0 )
+            rows = std::max(rows, (client.GetHeight() + m_lineHeight - 1) / m_lineHeight);
+
+        const int wantWidth = columns * m_charWidth;
+        const int wantHeight = rows * m_lineHeight;
+        const wxSize virt = GetVirtualSize();
+        if ( !reset && virt.GetWidth() == wantWidth && virt.GetHeight() == wantHeight )
+            return;
+        int viewX = 0;
+        int viewY = 0;
+        if ( !reset )
+            GetViewStart(&viewX, &viewY);
+        m_updatingScroll = true;
+        SetScrollbars(m_charWidth, m_lineHeight, columns, rows, viewX, viewY);
+        m_updatingScroll = false;
+    }
+
     void OnPaint(wxPaintEvent&)
     {
-        wxBufferedPaintDC dc(this);
+        wxAutoBufferedPaintDC dc(this);
+        const wxSize client = GetClientSize();
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(GetBackgroundColour()));
+        dc.DrawRectangle(0, 0, std::max(1, client.GetWidth()), std::max(1, client.GetHeight()));
+
         DoPrepareDC(dc);
         dc.SetFont(GetFont());
 
         int viewX = 0;
         int viewY = 0;
         GetViewStart(&viewX, &viewY);
-        const int visible = GetClientSize().GetHeight() / m_lineHeight + 2;
-        const int width = std::max(GetClientSize().GetWidth() + viewX * m_charWidth, m_gutter + 200);
+        const int visible = client.GetHeight() / m_lineHeight + 2;
+        const int originX = viewX * m_charWidth;
+        const int originY = viewY * m_lineHeight;
+        const int width = std::max(client.GetWidth() + originX, m_gutter + 200);
+        const int bottom = std::max(originY + client.GetHeight(),
+                                     static_cast<int>(m_diff.lines.size()) * m_lineHeight);
+
+        const wxColour gutterColour(246, 248, 250);
+        const wxColour ruleColour(208, 215, 222);
+        dc.SetBrush(wxBrush(gutterColour));
+        dc.DrawRectangle(0, originY, m_gutter, bottom - originY);
+        dc.SetPen(wxPen(ruleColour));
+        dc.DrawLine(m_gutter, originY, m_gutter, bottom);
 
         if ( m_diff.lines.empty() )
         {
@@ -470,7 +519,7 @@ private:
                 message = "This commit left the file unchanged.";
             if ( message.empty() )
                 message = "No diff to show.";
-            dc.DrawText(message, 16, 16);
+            dc.DrawText(message, m_gutter + 16, 16);
             return;
         }
 
@@ -503,10 +552,10 @@ private:
             const int y = i * m_lineHeight;
             dc.SetPen(*wxTRANSPARENT_PEN);
             dc.SetBrush(wxBrush(background));
-            dc.DrawRectangle(0, y, width, m_lineHeight);
-            dc.SetBrush(wxBrush(wxColour(246, 248, 250)));
+            dc.DrawRectangle(m_gutter, y, width - m_gutter, m_lineHeight);
+            dc.SetBrush(wxBrush(gutterColour));
             dc.DrawRectangle(0, y, m_gutter, m_lineHeight);
-            dc.SetPen(wxPen(wxColour(208, 215, 222)));
+            dc.SetPen(wxPen(ruleColour));
             dc.DrawLine(m_gutter, y, m_gutter, y + m_lineHeight);
 
             dc.SetTextForeground(wxColour(101, 109, 118));
@@ -528,6 +577,7 @@ private:
     int m_charWidth;
     int m_lineHeight;
     int m_gutter;
+    bool m_updatingScroll = false;
 };
 
 GitSumFrame::GitSumFrame(const GitSumConfig& config, bool silentNotices)
@@ -1313,8 +1363,6 @@ void GitSumFrame::ShowWorktreeDiff(const wxString& fullId, const wxString& short
                                     const wxString& oldPath, const wxString& newPath)
 {
     const GitCommitDiff diff = QueryCommitDiff(m_currentDir, fullId, oldPath, newPath);
-    if ( m_diffView )
-        m_diffView->SetDiff(diff);
     if ( m_diffTitle )
     {
         wxString title = oldPath == newPath ? newPath : oldPath + " -> " + newPath;
@@ -1327,6 +1375,8 @@ void GitSumFrame::ShowWorktreeDiff(const wxString& fullId, const wxString& short
     ApplyRightLayout();
     if ( m_right )
         m_right->Layout();
+    if ( m_diffView )
+        m_diffView->SetDiff(diff);
     if ( m_diffView )
         m_diffView->SetFocus();
 }
@@ -2578,6 +2628,11 @@ bool GitSumFrame::RunSelfTest()
          frame->m_diffView->Contains(GitDiffLine::Kind::Addition, "world") ||
          !frame->m_diffView->Contains(GitDiffLine::Kind::Addition, "hello") )
         return Fail("double-click did not show the file before this commit");
+    const wxSize diffClient = frame->m_diffView->GetClientSize();
+    const wxSize diffVirtual = frame->m_diffView->GetVirtualSize();
+    if ( (diffClient.GetWidth() > 0 && diffVirtual.GetWidth() < diffClient.GetWidth()) ||
+         (diffClient.GetHeight() > 0 && diffVirtual.GetHeight() < diffClient.GetHeight()) )
+        return Fail("diff view did not fill its area");
     wxCommandEvent back;
     frame->OnDiffBack(back);
     if ( frame->m_diffVisible || !frame->m_commitFiles->IsShown() || !frame->m_list->IsShown() )
