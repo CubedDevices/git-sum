@@ -120,7 +120,8 @@ private:
     void ShowCommitMessage(long index);
     void ShowCommitFiles(long index);
     void ApplyRightLayout();
-    void ShowWorktreeDiff(const wxString& fullId, const wxString& shortId, const wxString& relativePath);
+    void ShowWorktreeDiff(const wxString& fullId, const wxString& shortId,
+                          const wxString& oldPath, const wxString& newPath);
     void HideWorktreeDiff();
     void RefreshTree();
     void GoUp();

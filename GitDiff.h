@@ -1,6 +1,6 @@
 /////////////////////////////////////////////////////////////////////////////
 // Name:        GitDiff.h
-// Purpose:     Diff a committed file against the working tree
+// Purpose:     Diff a file against its version before a commit
 // Copyright:   Kenneth S. Davis, 2026
 // Licence:     GNU General Public License version 2
 /////////////////////////////////////////////////////////////////////////////
@@ -30,10 +30,10 @@
 #include <vector>
 
 /**
- * @brief One displayed row of a commit-to-worktree diff.
+ * @brief One displayed row of a parent-to-commit diff.
  *
- * Additions are lines present only in the working tree. Deletions are lines
- * present only in the commit.
+ * Additions are lines introduced by the commit. Deletions are lines that
+ * existed only in the parent version.
  */
 struct GitDiffLine
 {
@@ -52,9 +52,9 @@ struct GitDiffLine
 };
 
 /**
- * @brief Text diff of one path at a commit against the working tree file.
+ * @brief Text diff of one path from its first parent into a commit.
  */
-struct GitWorktreeDiff
+struct GitCommitDiff
 {
     bool ok = false;
     bool binary = false;
@@ -65,9 +65,10 @@ struct GitWorktreeDiff
     std::vector<GitDiffLine> lines;
 };
 
-/// Diff @a relativePath at commit @a fullId against the working tree file.
-GitWorktreeDiff QueryWorktreeDiff(const wxString& directory,
-                                   const wxString& fullId,
-                                   const wxString& relativePath);
+/// Diff @a oldPath in the first parent of @a fullId against @a newPath in that commit.
+GitCommitDiff QueryCommitDiff(const wxString& directory,
+                              const wxString& fullId,
+                              const wxString& oldPath,
+                              const wxString& newPath);
 
 #endif // GITDIFF_H

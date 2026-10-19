@@ -426,7 +426,7 @@ public:
         Bind(wxEVT_PAINT, &DiffView::OnPaint, this);
     }
 
-    void SetDiff(const GitWorktreeDiff& diff)
+    void SetDiff(const GitCommitDiff& diff)
     {
         m_diff = diff;
         int columns = 48;
@@ -467,7 +467,7 @@ private:
             if ( message.empty() && m_diff.binary )
                 message = "This file looks binary, so a text diff is not shown.";
             if ( message.empty() && m_diff.identical )
-                message = "The working tree matches this commit.";
+                message = "This commit left the file unchanged.";
             if ( message.empty() )
                 message = "No diff to show.";
             dc.DrawText(message, 16, 16);
@@ -524,7 +524,7 @@ private:
         }
     }
 
-    GitWorktreeDiff m_diff;
+    GitCommitDiff m_diff;
     int m_charWidth;
     int m_lineHeight;
     int m_gutter;
@@ -763,7 +763,7 @@ void GitSumFrame::BuildBody()
     diffHeader->Add(m_diffTitle, 1, wxALIGN_CENTER_VERTICAL);
     diffSizer->Add(diffHeader, 0, wxEXPAND | wxALL, 8);
     wxStaticText* legend = new wxStaticText(m_diffPanel, wxID_ANY,
-                                             "Red is only in this commit.  Green is only in the working tree.");
+                                             "Red is from the previous version.  Green was added by this commit.");
     legend->SetForegroundColour(wxColour(80, 90, 100));
     diffSizer->Add(legend, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
     m_diffView = new DiffView(m_diffPanel);
@@ -1309,17 +1309,18 @@ void GitSumFrame::ApplyRightLayout()
         sizer->Show(m_diffPanel, diff);
 }
 
-void GitSumFrame::ShowWorktreeDiff(const wxString& fullId, const wxString& shortId, const wxString& relativePath)
+void GitSumFrame::ShowWorktreeDiff(const wxString& fullId, const wxString& shortId,
+                                    const wxString& oldPath, const wxString& newPath)
 {
-    const GitWorktreeDiff diff = QueryWorktreeDiff(m_currentDir, fullId, relativePath);
+    const GitCommitDiff diff = QueryCommitDiff(m_currentDir, fullId, oldPath, newPath);
     if ( m_diffView )
         m_diffView->SetDiff(diff);
     if ( m_diffTitle )
     {
-        wxString title = relativePath;
+        wxString title = oldPath == newPath ? newPath : oldPath + " -> " + newPath;
         if ( !shortId.empty() )
             title += "    " + shortId;
-        title += "  compared with the working tree";
+        title += "  changes in this commit";
         m_diffTitle->SetLabel(title);
     }
     m_diffVisible = true;
@@ -1351,16 +1352,21 @@ void GitSumFrame::OnCommitFileActivated(wxListEvent& event)
     const wxString status = m_commitFiles->GetItemText(index, 0);
     if ( path.empty() || status.empty() )
         return;
+    wxString oldPath = path;
+    wxString newPath = path;
     const int arrow = path.Find(" -> ");
     if ( arrow != wxNOT_FOUND )
-        path = path.Mid(arrow + 4);
+    {
+        oldPath = path.Left(arrow);
+        newPath = path.Mid(arrow + 4);
+    }
 
     long commit = m_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
     if ( commit < 0 )
         commit = 0;
     if ( commit < 0 || static_cast<size_t>(commit) >= m_logIds.size() )
         return;
-    ShowWorktreeDiff(m_logIds[static_cast<size_t>(commit)], m_list->GetItemText(commit, 0), path);
+    ShowWorktreeDiff(m_logIds[static_cast<size_t>(commit)], m_list->GetItemText(commit, 0), oldPath, newPath);
 }
 
 void GitSumFrame::OnDiffBack(wxCommandEvent&)
@@ -2568,8 +2574,10 @@ bool GitSumFrame::RunSelfTest()
     frame->OnCommitFileActivated(activate);
     if ( !frame->m_diffVisible || !frame->m_diffPanel->IsShown() || frame->m_list->IsShown() ||
          !frame->m_diffTitle->GetLabel().Contains("hello.txt") ||
-         !frame->m_diffView->Contains(GitDiffLine::Kind::Addition, "world") )
-        return Fail("double-click did not diff the commit file against the working tree");
+         !frame->m_diffTitle->GetLabel().Contains("changes in this commit") ||
+         frame->m_diffView->Contains(GitDiffLine::Kind::Addition, "world") ||
+         !frame->m_diffView->Contains(GitDiffLine::Kind::Addition, "hello") )
+        return Fail("double-click did not show the file before this commit");
     wxCommandEvent back;
     frame->OnDiffBack(back);
     if ( frame->m_diffVisible || !frame->m_commitFiles->IsShown() || !frame->m_list->IsShown() )

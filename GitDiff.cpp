@@ -1,6 +1,6 @@
 /////////////////////////////////////////////////////////////////////////////
 // Name:        GitDiff.cpp
-// Purpose:     Diff a committed file against the working tree
+// Purpose:     Diff a file against its version before a commit
 // Copyright:   Kenneth S. Davis, 2026
 // Licence:     GNU General Public License version 2
 /////////////////////////////////////////////////////////////////////////////
@@ -25,10 +25,6 @@
 #include "GitDiff.h"
 
 #include "git2.h"
-
-#include "wx/ffile.h"
-#include "wx/filename.h"
-#include "wx/log.h"
 
 #include <vector>
 
@@ -128,45 +124,36 @@ int LineCallback(const git_diff_delta*, const git_diff_hunk*, const git_diff_lin
     return 0;
 }
 
-bool ReadFileBytes(const wxString& path, std::vector<char>& bytes, wxString& error)
+git_blob* BlobAt(git_repository* repo, git_tree* tree, const wxString& path, wxString& error)
 {
-    if ( !wxFileName::FileExists(path) )
-        return true;
-    wxLogNull quiet;
-    wxFFile file(path, "rb");
-    if ( !file.IsOpened() )
+    if ( !tree || path.empty() )
+        return nullptr;
+    const wxScopedCharBuffer pathUtf8 = path.utf8_str();
+    git_tree_entry* entry = nullptr;
+    if ( git_tree_entry_bypath(&entry, tree, pathUtf8.data()) != 0 || !entry )
+        return nullptr;
+    git_blob* blob = nullptr;
+    if ( git_blob_lookup(&blob, repo, git_tree_entry_id(entry)) != 0 )
+        blob = nullptr;
+    else if ( git_blob_rawsize(blob) > kMaxBytes )
     {
-        error = "Could not read the working tree file.";
-        return false;
+        error = "The file is too large to diff.";
+        git_blob_free(blob);
+        blob = nullptr;
     }
-    const wxFileOffset length = file.Length();
-    if ( length < 0 )
-    {
-        error = "Could not read the working tree file.";
-        return false;
-    }
-    if ( static_cast<size_t>(length) > kMaxBytes )
-    {
-        error = "The working tree file is too large to diff.";
-        return false;
-    }
-    bytes.resize(static_cast<size_t>(length));
-    if ( length > 0 && file.Read(bytes.data(), static_cast<size_t>(length)) != static_cast<size_t>(length) )
-    {
-        error = "Could not read the working tree file.";
-        return false;
-    }
-    return true;
+    git_tree_entry_free(entry);
+    return blob;
 }
 
 } // namespace
 
-GitWorktreeDiff QueryWorktreeDiff(const wxString& directory,
-                                   const wxString& fullId,
-                                   const wxString& relativePath)
+GitCommitDiff QueryCommitDiff(const wxString& directory,
+                              const wxString& fullId,
+                              const wxString& oldPath,
+                              const wxString& newPath)
 {
-    GitWorktreeDiff result;
-    result.path = relativePath;
+    GitCommitDiff result;
+    result.path = newPath.empty() ? oldPath : newPath;
     git_libgit2_init();
 
     const wxScopedCharBuffer dirUtf8 = directory.utf8_str();
@@ -187,20 +174,10 @@ GitWorktreeDiff QueryWorktreeDiff(const wxString& directory,
         return result;
     }
 
-    const char* workdir = git_repository_workdir(repo);
-    if ( !workdir )
-    {
-        result.error = "This repository has no working tree.";
-        git_repository_free(repo);
-        return result;
-    }
-
     git_oid oid;
     const wxScopedCharBuffer idUtf8 = fullId.utf8_str();
     git_commit* commit = nullptr;
     git_tree* tree = nullptr;
-    git_tree_entry* entry = nullptr;
-    git_blob* blob = nullptr;
     if ( git_oid_fromstr(&oid, idUtf8.data()) != 0 ||
          git_commit_lookup(&commit, repo, &oid) != 0 || !commit ||
          git_commit_tree(&tree, commit) != 0 || !tree )
@@ -214,16 +191,18 @@ GitWorktreeDiff QueryWorktreeDiff(const wxString& directory,
         return result;
     }
 
-    const wxScopedCharBuffer pathUtf8 = relativePath.utf8_str();
-    if ( git_tree_entry_bypath(&entry, tree, pathUtf8.data()) == 0 && entry )
+    git_commit* parent = nullptr;
+    git_tree* parentTree = nullptr;
+    if ( git_commit_parentcount(commit) > 0 )
     {
-        if ( git_blob_lookup(&blob, repo, git_tree_entry_id(entry)) != 0 )
-            blob = nullptr;
-        else if ( git_blob_rawsize(blob) > kMaxBytes )
+        if ( git_commit_parent(&parent, commit, 0) != 0 || !parent ||
+             git_commit_tree(&parentTree, parent) != 0 || !parentTree )
         {
-            result.error = "The committed file is too large to diff.";
-            git_blob_free(blob);
-            git_tree_entry_free(entry);
+            result.error = GitLastError("Could not read the previous version.");
+            if ( parentTree )
+                git_tree_free(parentTree);
+            if ( parent )
+                git_commit_free(parent);
             git_tree_free(tree);
             git_commit_free(commit);
             git_repository_free(repo);
@@ -231,20 +210,20 @@ GitWorktreeDiff QueryWorktreeDiff(const wxString& directory,
         }
     }
 
-    wxString relative = relativePath;
-    relative.Replace("/", wxString(wxFileName::GetPathSeparator()));
-    wxString workPath = wxString::FromUTF8(workdir);
-    workPath.Replace("/", wxString(wxFileName::GetPathSeparator()));
-    if ( !workPath.empty() && !workPath.EndsWith(wxFileName::GetPathSeparator()) )
-        workPath += wxFileName::GetPathSeparator();
-    workPath += relative;
-    std::vector<char> workBytes;
-    if ( !ReadFileBytes(workPath, workBytes, result.error) )
+    wxString tooLarge;
+    git_blob* oldBlob = BlobAt(repo, parentTree, oldPath, tooLarge);
+    git_blob* newBlob = tooLarge.empty() ? BlobAt(repo, tree, newPath, tooLarge) : nullptr;
+    if ( !tooLarge.empty() )
     {
-        if ( blob )
-            git_blob_free(blob);
-        if ( entry )
-            git_tree_entry_free(entry);
+        result.error = tooLarge;
+        if ( oldBlob )
+            git_blob_free(oldBlob);
+        if ( newBlob )
+            git_blob_free(newBlob);
+        if ( parentTree )
+            git_tree_free(parentTree);
+        if ( parent )
+            git_commit_free(parent);
         git_tree_free(tree);
         git_commit_free(commit);
         git_repository_free(repo);
@@ -259,15 +238,21 @@ GitWorktreeDiff QueryWorktreeDiff(const wxString& directory,
     collect.truncated = &truncated;
     git_diff_options options = GIT_DIFF_OPTIONS_INIT;
     options.context_lines = 3;
-    const int compared = git_diff_blob_to_buffer(
-        blob, pathUtf8.data(),
-        workBytes.empty() ? nullptr : workBytes.data(), workBytes.size(), pathUtf8.data(),
+    const wxScopedCharBuffer oldUtf8 = oldPath.utf8_str();
+    const wxScopedCharBuffer newUtf8 = newPath.utf8_str();
+    const int compared = git_diff_blobs(
+        oldBlob, oldPath.empty() ? nullptr : oldUtf8.data(),
+        newBlob, newPath.empty() ? nullptr : newUtf8.data(),
         &options, FileCallback, nullptr, HunkCallback, LineCallback, &collect);
 
-    if ( blob )
-        git_blob_free(blob);
-    if ( entry )
-        git_tree_entry_free(entry);
+    if ( oldBlob )
+        git_blob_free(oldBlob);
+    if ( newBlob )
+        git_blob_free(newBlob);
+    if ( parentTree )
+        git_tree_free(parentTree);
+    if ( parent )
+        git_commit_free(parent);
     git_tree_free(tree);
     git_commit_free(commit);
     git_repository_free(repo);
